@@ -1,177 +1,135 @@
-// Palm City Heat — fists, pistol, bullets, particles and pickups.
-// Combat is deliberately light: a short-range melee swing and a mouse-aimed
-// pistol with scarce ammo. Every violent act asks the witness system whether
-// anyone saw it before it adds heat. Noise (gunshots, crashes) also scares
-// pedestrians through the danger list main builds each step.
+// Palm City Heat — fighting.
+// One job: fists, the pistol, bullets in flight, and the pickups that fall
+// out of the world (cash, ammo, health). Palm City settles things personally.
 
-import { PLAYER, CRIME_HEAT } from './config.js';
-import { knockDown } from './peds.js';
+import { GUN, PLAYER } from './config.js';
+import { dist2 } from './random.js';
+import { pointInBuilding } from './world.js';
+import { hurtPed } from './peds.js';
+import { damageCar } from './vehicles.js';
 
-export function pointBlocked(world, x, y) {
-  for (const b of world.buildings) {
-    if (x >= b.x && x <= b.x + b.w && y >= b.y && y <= b.y + b.h) return true;
-  }
-  for (const w of world.waterRects) {
-    if (x >= w.x && x <= w.x + w.w && y >= w.y && y <= w.y + w.h) return true;
-  }
-  return false;
+export function playerWeapon(state) {
+  return state.player.ammo > 0 ? 'pistol' : 'fists';
 }
 
-export function spawnParticles(state, x, y, n, color, speed = 90, life = 0.45, size = 3) {
-  for (let i = 0; i < n; i++) {
-    const a = state.rng.angle();
-    const s = speed * (0.3 + state.rng.next() * 0.7);
-    state.particles.push({
-      x, y,
-      vx: Math.cos(a) * s, vy: Math.sin(a) * s,
-      life: life * (0.5 + state.rng.next() * 0.5), maxLife: life,
-      color, size,
+export function stepCombat(state, input) {
+  const p = state.player;
+  if (p.attackCd > 0) p.attackCd--;
+  state.bullets = state.bullets.filter((b) => stepBullet(state, b));
+  stepPickups(state);
+  if (p.inCar || state.screen !== 'play' || state.mission.dialogue) return;
+  if (!input.attack && !input.attackPressed) return;
+  if (p.attackCd > 0) return;
+
+  if (playerWeapon(state) === 'pistol') {
+    p.attackCd = GUN.cooldown;
+    p.ammo--;
+    const a = p.aimAngle;
+    state.bullets.push({
+      id: state.nextId++,
+      x: p.x + Math.cos(a) * 16, y: p.y + Math.sin(a) * 16,
+      vx: Math.cos(a) * GUN.bulletSpeed, vy: Math.sin(a) * GUN.bulletSpeed,
+      life: GUN.bulletLife,
     });
+    p.muzzleT = state.tick;
+    state.threat = { x: p.x, y: p.y, t: state.tick }; // gunfire carries
+    state.reportCrime('shotFired', p.x, p.y);
+    state.audio.gunshot();
+    state.shake = Math.max(state.shake, 1.5);
+  } else {
+    p.attackCd = PLAYER.meleeCooldown;
+    state.audio.melee();
+    // Fists find the nearest person inside range, biased toward the aim.
+    let best = null;
+    let bestD = PLAYER.meleeRange * PLAYER.meleeRange;
+    for (const ped of state.peds) {
+      if (ped.mode === 'dead') continue;
+      const d2 = dist2(p.x, p.y, ped.x, ped.y);
+      if (d2 < bestD) { bestD = d2; best = ped; }
+    }
+    if (best) {
+      hurtPed(state, best, PLAYER.meleeDamage, p.x, p.y);
+      state.reportCrime('melee', p.x, p.y);
+      state.audio.hit();
+      state.shake = Math.max(state.shake, 2);
+    }
   }
 }
 
-export function addFloater(state, x, y, text, color = '#ffd23e') {
-  state.floaters.push({ x, y, text, color, t: 0, life: 1.4 });
-}
-
-export function dropPickup(state, kind, x, y, amount = 0) {
-  state.pickups.push({ kind, x, y, amount, t: 0 });
-}
-
-// --- player attacks -------------------------------------------------------
-
-export function playerMelee(state) {
-  const p = state.player;
-  p.swingT = 0.22;
-  state.sounds.push('melee');
-  const fx = p.x + Math.cos(p.angle) * PLAYER.meleeRange;
-  const fy = p.y + Math.sin(p.angle) * PLAYER.meleeRange;
-  let hitSomething = false;
+function stepBullet(state, b) {
+  b.x += b.vx;
+  b.y += b.vy;
+  b.life--;
+  if (b.life <= 0) return false;
+  if (pointInBuilding(state.city, b.x, b.y)) {
+    state.spawnParticles(b.x, b.y, 2, '#ffd23f');
+    return false;
+  }
   for (const ped of state.peds) {
-    if (ped.state === 'down') continue;
-    if (Math.hypot(ped.x - fx, ped.y - fy) < 20) {
-      knockDown(ped);
-      spawnParticles(state, ped.x, ped.y, 6, '#d8cfc0', 70, 0.35);
-      dropPickup(state, 'cash', ped.x, ped.y, 5 + Math.floor(state.rng.next() * 20));
-      state.reportCrime('melee', ped.x, ped.y);
-      hitSomething = true;
+    if (ped.mode === 'dead') continue;
+    if (dist2(b.x, b.y, ped.x, ped.y) < 14 * 14) {
+      hurtPed(state, ped, GUN.damage, b.x - b.vx, b.y - b.vy);
+      return false;
     }
   }
-  for (const car of state.cars) {
-    if (car.dead) continue;
-    if (Math.hypot(car.x - fx, car.y - fy) < 30) {
-      car.health -= 6;
-      spawnParticles(state, fx, fy, 5, '#ffd23e', 80, 0.3);
-      hitSomething = true;
+  for (const v of state.vehicles) {
+    if (v.dead || state.player.inCar === v.id) continue;
+    if (dist2(b.x, b.y, v.x, v.y) < 21 * 21) {
+      damageCar(state, v, 11, b.x, b.y);
+      if (v.kind === 'cop') state.reportCrime('shotFired', b.x, b.y);
+      return false;
     }
   }
-  if (!hitSomething) {
-    // Whiffed swing still startles anyone close.
-    for (const ped of state.peds) {
-      if (ped.state !== 'down' && Math.hypot(ped.x - p.x, ped.y - p.y) < 60) {
-        state.scareAt(ped, p.x, p.y);
-      }
-    }
-  }
+  return true;
 }
 
-export function playerShoot(state, angle) {
-  const p = state.player;
-  if (p.ammo <= 0) {
-    state.sounds.push('empty');
-    return;
-  }
-  p.ammo -= 1;
-  p.muzzleT = 0.06;
-  state.sounds.push('shot');
-  const bx = p.x + Math.cos(angle) * 16;
-  const by = p.y + Math.sin(angle) * 16;
-  state.bullets.push({ x: bx, y: by, vx: Math.cos(angle) * 780, vy: Math.sin(angle) * 780, life: 0.85 });
-  spawnParticles(state, bx, by, 3, '#ffe9a0', 60, 0.12, 2);
-  // Gunfire is loud: peds scatter and anyone in earshot counts as a witness.
-  state.noise.push({ x: p.x, y: p.y, r: 175, ttl: 0.4 });
-  state.reportCrime('gunshot', p.x, p.y);
-}
-
-// --- per-step updates -----------------------------------------------------
-
-export function stepBullets(state, dt) {
-  const world = state.world;
-  for (const b of state.bullets) {
-    b.life -= dt;
-    b.x += b.vx * dt;
-    b.y += b.vy * dt;
-    if (b.life <= 0) continue;
-    if (pointBlocked(world, b.x, b.y)) {
-      spawnParticles(state, b.x, b.y, 4, '#ffd23e', 70, 0.25, 2);
-      b.life = 0;
-      continue;
-    }
-    for (const ped of state.peds) {
-      if (ped.state === 'down') continue;
-      if (Math.hypot(ped.x - b.x, ped.y - b.y) < 9) {
-        knockDown(ped);
-        spawnParticles(state, ped.x, ped.y, 8, '#c94f43', 80, 0.4);
-        dropPickup(state, 'cash', ped.x, ped.y, 8 + Math.floor(state.rng.next() * 25));
-        state.reportCrime('gunshot', ped.x, ped.y);
-        b.life = 0;
-        break;
-      }
-    }
-    if (b.life <= 0) continue;
-    for (const car of state.cars) {
-      if (car.dead || car === state.player.inCar) continue;
-      if (Math.hypot(car.x - b.x, car.y - b.y) < 24) {
-        car.health -= 16;
-        spawnParticles(state, b.x, b.y, 5, '#ffd23e', 90, 0.3, 2);
-        if (car.driver === 'traffic') state.scareCar(car);
-        b.life = 0;
-        break;
-      }
-    }
-  }
-  state.bullets = state.bullets.filter((b) => b.life > 0);
-}
-
-export function stepParticles(state, dt) {
-  for (const pt of state.particles) {
-    pt.life -= dt;
-    pt.x += pt.vx * dt;
-    pt.y += pt.vy * dt;
-    pt.vx *= 0.92;
-    pt.vy *= 0.92;
-  }
-  state.particles = state.particles.filter((p) => p.life > 0);
-  for (const f of state.floaters) {
-    f.t += dt;
-    f.y -= 26 * dt;
-  }
-  state.floaters = state.floaters.filter((f) => f.t < f.life);
-}
-
-export function stepPickups(state, dt) {
+function stepPickups(state) {
   const p = state.player;
   for (const pk of state.pickups) {
-    pk.t += dt;
-    const reach = p.inCar ? 30 : 20;
-    if (Math.hypot(pk.x - p.x, pk.y - p.y) < reach) {
+    pk.t++;
+    if (dist2(p.x, p.y, pk.x, pk.y) < 26 * 26) {
       pk.taken = true;
       if (pk.kind === 'cash') {
         p.cash += pk.amount;
-        addFloater(state, p.x, p.y - 18, `+$${pk.amount}`, '#8be08b');
-        state.sounds.push('cash');
+        state.addFloater(pk.x, pk.y - 16, `+$${pk.amount}`, '#7be495');
+        state.audio.cash();
       } else if (pk.kind === 'ammo') {
         p.ammo += pk.amount;
-        addFloater(state, p.x, p.y - 18, `+${pk.amount} ammo`, '#ffe9a0');
-        state.sounds.push('pickup');
+        state.addFloater(pk.x, pk.y - 16, `+${pk.amount} ammo`, '#ffd23f');
+        state.audio.pickup();
       } else if (pk.kind === 'health') {
-        p.hp = Math.min(100, p.hp + pk.amount);
-        addFloater(state, p.x, p.y - 18, `+${pk.amount} HP`, '#8be08b');
-        state.sounds.push('pickup');
+        p.hp = Math.min(PLAYER.hp, p.hp + pk.amount);
+        state.addFloater(pk.x, pk.y - 16, `+${pk.amount} HP`, '#7be495');
+        state.audio.pickup();
       }
     }
   }
-  state.pickups = state.pickups.filter((pk) => !pk.taken && pk.t < 90);
+  state.pickups = state.pickups.filter((pk) => !pk.taken);
 }
 
-export { CRIME_HEAT };
+// Standing pickups the city always offers: shells at the gun shop, bandages
+// at the hospital, a bite at the diner. They restock over time.
+export function seedPickups(state) {
+  const L = state.city.locations;
+  const spots = [
+    { kind: 'ammo', at: L.gunshop, amount: 18 },
+    { kind: 'ammo', at: L.gunshop, amount: 18 },
+    { kind: 'health', at: L.hospital, amount: 40 },
+    { kind: 'health', at: L.diner, amount: 25 },
+  ];
+  for (const s of spots) {
+    if (!s.at) continue;
+    state.pickups.push({ id: state.nextId++, kind: s.kind, x: s.at.x + 18, y: s.at.y + 6, amount: s.amount, t: state.rng.int(0, 60), restock: true });
+  }
+}
+
+export function restockPickups(state) {
+  if (state.tick % 1800 !== 0) return; // every 30 s, top the shelves back up
+  const L = state.city.locations;
+  const kinds = [['ammo', L.gunshop], ['health', L.hospital]];
+  for (const [kind, at] of kinds) {
+    if (!at) continue;
+    const exists = state.pickups.some((pk) => pk.kind === kind && dist2(pk.x, pk.y, at.x, at.y) < 80 * 80);
+    if (!exists) state.pickups.push({ id: state.nextId++, kind, x: at.x + 18, y: at.y + 6, amount: kind === 'ammo' ? 18 : 40, t: 0, restock: true });
+  }
+}

@@ -1,91 +1,106 @@
-// Palm City Heat — tuning constants, palette and shared knobs.
-// Everything the other modules need to agree on lives here: the fixed-step
-// simulation rate, the city grid geometry, the golden-hour palette and the
-// wanted/heat economy. No game logic in this file.
+// Palm City Heat — tuning constants and palette.
+// One job: every number the rest of the game agrees on lives here.
 
 export const STEP = 1 / 60; // fixed simulation step, seconds
 
-// Logical view size. The canvas is scaled by CSS to fill the window, but the
-// world is always rendered through a 960x540 camera window.
-export const VIEW_W = 960;
-export const VIEW_H = 540;
-
-// City grid: blocks of BLOCK px separated by roads of ROAD px. A beach and a
-// water strip are appended on the east edge inside buildWorld().
-export const GRID = {
-  cols: 7,
-  rows: 5,
-  block: 264,
-  road: 96,
+export const WORLD = {
+  w: 4800,
+  h: 3900,
+  roadW: 110, // road band width in px
+  vRoads: [300, 1100, 1900, 2700, 3500, 4300], // centre x of vertical roads
+  hRoads: [300, 1000, 1700, 2400, 3100], // centre y of horizontal roads
+  beachY: 3155, // sand starts here (last road's south edge)
+  waterY: 3560, // open water starts here
 };
-export const PITCH = GRID.block + GRID.road; // 360
 
-// Player / world physics.
 export const PLAYER = {
-  radius: 9,
-  walkSpeed: 132,
-  runSpeed: 216,
-  maxHealth: 100,
-  enterCarRange: 40,
+  radius: 13,
+  walk: 2.3, // px per step
+  run: 3.6,
+  hp: 100,
   meleeRange: 30,
   meleeDamage: 34,
+  meleeCooldown: 22, // steps
+  enterRange: 48, // how close to a car door to get in
 };
 
-// Wanted heat: crimes add heat points, stars are read off the thresholds.
-// Index 0 is "clean"; thresholds[i] is the heat needed for i+1 stars.
-export const HEAT_THRESHOLDS = [15, 40, 70, 105, 145];
-export const HEAT_DECAY_PER_SEC = 3.0; // only while unobserved
-export const HEAT_DECAY_DELAY = 6; // seconds after the last witnessed crime
-export const CRIME_HEAT = {
-  theft: 14,
-  carjack: 20,
-  hitAndRun: 22,
-  collision: 6,
-  gunshot: 16,
-  melee: 10,
-  missionAlarm: 55,
+export const CAR = {
+  radius: 17,
+  accel: 0.16,
+  brake: 0.3,
+  reverseAccel: 0.09,
+  maxSpeed: 7.4,
+  maxReverse: 2.6,
+  turnRate: 0.052, // rad per step at full lock, scaled by speed
+  trafficSpeed: 2.6,
+  trafficCount: 26,
+  parkedCount: 34,
 };
 
-// How many police cars the city fields per wanted level (index = stars).
-export const POLICE_PER_STAR = [0, 2, 3, 4, 5, 6];
-export const BUST_TIME = 2.4; // seconds of close, slow contact to get busted
-
-// Game clock: starts at 17:30 (golden hour), one real second = one game minute.
-export const CLOCK_START_MINUTES = 17 * 60 + 30;
-
-// Golden-hour palette: warm asphalt, peach sidewalks, teal-gold water.
-export const PALETTE = {
-  sky: '#2b1a2e', // page background behind the canvas
-  asphalt: '#4a4048',
-  asphaltDark: '#413842',
-  laneMark: '#e8c87a',
-  crosswalk: '#d8cfc0',
-  sidewalk: '#9c7f6d',
-  sidewalkEdge: '#7d6455',
-  grass: '#5d7d43',
-  grassDark: '#52713c',
-  sand: '#e0bd85',
-  sandDark: '#d0ab72',
-  water: '#2e6f79',
-  waterDeep: '#256069',
-  waterFoam: '#bfe3dd',
-  roofShadow: 'rgba(43, 20, 32, 0.35)',
-  sunGlow: 'rgba(255, 166, 88, 0.10)',
-  hudPanel: 'rgba(20, 12, 24, 0.62)',
-  hudText: '#ffe9c9',
-  hudAccent: '#ffb347',
-  danger: '#ff5a4e',
-  marker: '#ffd23e',
-  policeBlip: '#5aa2ff',
+export const PED = {
+  radius: 11,
+  count: 42,
+  walk: 0.9,
+  flee: 2.4,
+  hp: 60,
 };
 
-export const DISTRICT_ROOFS = {
-  downtown: ['#8a5a68', '#75506b', '#96626f', '#6d4a63', '#845664'],
-  commercial: ['#b0764f', '#a56643', '#bb815a', '#9c5f42'],
-  suburbs: ['#c9a06b', '#bd9261', '#d2ab77', '#c79e68'],
-  park: [],
-  beach: [],
+export const COP = {
+  maxUnits: 6,
+  spawnGap: 200, // steps between reinforcements
+  speed: 6.9,
+  bustRange: 105,
+  bustFill: 1.6, // per step while conditions hold
+  bustDrain: 1.1,
 };
 
-// Save-game storage key.
+export const HEAT = {
+  // heat points per witnessed crime
+  theft: 22,
+  carjack: 26,
+  hitPed: 30,
+  hitCar: 8,
+  shotFired: 14,
+  melee: 16,
+  missionAlarm: 60,
+  perStar: 22, // stars = ceil(heat / perStar), capped at 5
+  decay: 0.055, // heat per step while unseen
+  seenRadius: 340, // a ped or cop inside this can witness a crime
+};
+
+export const GUN = {
+  damage: 40,
+  bulletSpeed: 10,
+  bulletLife: 42, // steps
+  cooldown: 13,
+  startAmmo: 24,
+};
+
+export const DAY = {
+  startMinutes: 17 * 60 + 42, // 17:42, deep golden hour
+  stepsPerMinute: 30,
+};
+
 export const SAVE_KEY = 'palm-city-heat-save-v1';
+
+// Golden-hour palette: hot coral light on cream stucco and teal water.
+export const PALETTE = {
+  asphalt: '#3d3a44',
+  asphaltEdge: '#33303b',
+  laneMark: '#f7c873',
+  sidewalk: '#cbb59a',
+  grass: '#7fae5a',
+  parkGrass: '#86b95f',
+  sand: '#eed9a0',
+  water: '#2e8fa3',
+  waterDeep: '#22707f',
+  shadow: 'rgba(46, 16, 40, 0.35)',
+  hudPanel: 'rgba(24, 14, 26, 0.72)',
+  hudText: '#ffe9c9',
+  accent: '#ff7847',
+  accent2: '#ffd23f',
+  good: '#7be495',
+  bad: '#ff5d5d',
+};
+
+export const FONT = 'system-ui, -apple-system, "Segoe UI", sans-serif';

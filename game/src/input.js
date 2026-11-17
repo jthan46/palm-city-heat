@@ -1,83 +1,82 @@
-// Palm City Heat — keyboard and mouse state.
-// One Input object owns every listener. The game reads held keys each fixed
-// step and consumes edge presses (for menus, entering cars, dialogue) so a
-// press is never seen twice. In the headless test a fake window is passed in
-// and events are fired through the same listener registry.
+// Palm City Heat — keyboard and mouse input.
+// One job: turn raw browser events into the per-step input object the
+// simulation consumes. The sim never reads the DOM; tests feed it literals.
 
-export class Input {
-  constructor(win) {
-    this.keys = new Set(); // codes currently held
-    this.pressed = new Set(); // codes pressed since last consume
-    this.mouse = { x: 0, y: 0, down: false, clicked: false };
-    this.enabled = true;
+export function blankInput() {
+  return {
+    up: false, down: false, left: false, right: false, run: false,
+    interact: false, // E / F — one-shot, consumed by the sim
+    attack: false, // held: melee (J or mouse) / fire with pistol
+    attackPressed: false,
+    pausePressed: false,
+    confirmPressed: false,
+    continuePressed: false, // C — Continue on the title screen
+    mutePressed: false,
+    mouseX: 0, mouseY: 0, mouseDown: false,
+    aimAngle: null, // tests may set this directly
+  };
+}
 
-    if (win && typeof win.addEventListener === 'function') {
-      win.addEventListener('keydown', (e) => {
-        if (e.repeat) return;
-        this.keys.add(e.code);
-        this.pressed.add(e.code);
-        if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(e.code)) {
-          if (typeof e.preventDefault === 'function') e.preventDefault();
-        }
-      });
-      win.addEventListener('keyup', (e) => {
-        this.keys.delete(e.code);
-      });
-      win.addEventListener('blur', () => {
-        this.keys.clear();
-      });
+const HELD = {
+  KeyW: 'up', ArrowUp: 'up',
+  KeyS: 'down', ArrowDown: 'down',
+  KeyA: 'left', ArrowLeft: 'left',
+  KeyD: 'right', ArrowRight: 'right',
+  ShiftLeft: 'run', ShiftRight: 'run',
+  KeyJ: 'attack',
+};
+
+export function createInput(canvas) {
+  const input = blankInput();
+  const held = { up: false, down: false, left: false, right: false, run: false, attack: false };
+  const pressed = new Set();
+
+  window.addEventListener('keydown', (event) => {
+    const field = HELD[event.code];
+    if (field) held[field] = true;
+    if (!event.repeat) {
+      if (event.code === 'KeyE' || event.code === 'KeyF') pressed.add('interact');
+      if (event.code === 'KeyJ' || event.code === 'Enter' || event.code === 'Space') pressed.add('attackTap');
+      if (event.code === 'KeyP' || event.code === 'Escape') pressed.add('pause');
+      if (event.code === 'Enter' || event.code === 'Space') pressed.add('confirm');
+      if (event.code === 'KeyC') pressed.add('continue');
+      if (event.code === 'KeyM') pressed.add('mute');
     }
-  }
+    if (['ArrowUp', 'ArrowDown', 'ArrowLeft', 'ArrowRight', 'Space'].includes(event.code)) event.preventDefault();
+  });
+  window.addEventListener('keyup', (event) => {
+    const field = HELD[event.code];
+    if (field) held[field] = false;
+  });
+  window.addEventListener('blur', () => {
+    for (const k of Object.keys(held)) held[k] = false;
+    input.mouseDown = false;
+  });
+  canvas.addEventListener('pointermove', (event) => {
+    const rect = canvas.getBoundingClientRect();
+    input.mouseX = event.clientX - rect.left;
+    input.mouseY = event.clientY - rect.top;
+  });
+  canvas.addEventListener('pointerdown', (event) => {
+    input.mouseDown = true;
+    input.mouseX = event.clientX - canvas.getBoundingClientRect().left;
+    input.mouseY = event.clientY - canvas.getBoundingClientRect().top;
+    pressed.add('attackTap');
+    pressed.add('confirm');
+  });
+  window.addEventListener('pointerup', () => { input.mouseDown = false; });
 
-  // Attach mouse tracking to a canvas-like element. Coordinates are reported
-  // in the element's own pixel space and scaled by main into view space.
-  attachMouse(el, getRect) {
-    if (!el || typeof el.addEventListener !== 'function') return;
-    el.addEventListener('mousemove', (e) => {
-      const r = getRect();
-      this.mouse.x = e.clientX - r.left;
-      this.mouse.y = e.clientY - r.top;
-    });
-    el.addEventListener('mousedown', (e) => {
-      if (e.button === 0) {
-        this.mouse.down = true;
-        this.mouse.clicked = true;
-      }
-    });
-    el.addEventListener('mouseup', (e) => {
-      if (e.button === 0) this.mouse.down = false;
-    });
-  }
-
-  down(code) {
-    return this.keys.has(code);
-  }
-
-  // True once per physical press until consumed.
-  consume(code) {
-    if (this.pressed.has(code)) {
-      this.pressed.delete(code);
-      return true;
-    }
-    return false;
-  }
-
-  consumeClick() {
-    const c = this.mouse.clicked;
-    this.mouse.clicked = false;
-    return c;
-  }
-
-  // Movement axes from WASD + arrows.
-  moveX() {
-    return (this.down('KeyD') || this.down('ArrowRight') ? 1 : 0) - (this.down('KeyA') || this.down('ArrowLeft') ? 1 : 0);
-  }
-
-  moveY() {
-    return (this.down('KeyS') || this.down('ArrowDown') ? 1 : 0) - (this.down('KeyW') || this.down('ArrowUp') ? 1 : 0);
-  }
-
-  running() {
-    return this.down('ShiftLeft') || this.down('ShiftRight');
-  }
+  // Build the per-step snapshot, draining one-shot presses exactly once.
+  return function readInput() {
+    Object.assign(input, held);
+    input.interact = pressed.has('interact');
+    input.attackPressed = pressed.has('attackTap');
+    input.pausePressed = pressed.has('pause');
+    input.confirmPressed = pressed.has('confirm');
+    input.continuePressed = pressed.has('continue');
+    input.mutePressed = pressed.has('mute');
+    input.attack = held.attack || input.mouseDown;
+    pressed.clear();
+    return { ...input };
+  };
 }

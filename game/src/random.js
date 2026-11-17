@@ -1,7 +1,6 @@
 // Palm City Heat — deterministic randomness.
-// The whole simulation draws from one mulberry32 stream so a run is fully
-// reproducible from its seed: same seed + same inputs = same city, same
-// traffic, same everything. Rendering and audio never touch this stream.
+// One job: a seeded PRNG (mulberry32) plus small helpers, so a run replays
+// exactly from its seed — the simulation never touches Math.random.
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
@@ -14,32 +13,53 @@ export function mulberry32(seed) {
   };
 }
 
-export class RNG {
-  constructor(seed) {
-    this.next = mulberry32(seed);
-    this.seed = seed >>> 0;
-  }
+// An RNG with the conveniences the game wants, all drawn from one stream.
+export function makeRng(seed) {
+  const next = mulberry32(seed);
+  return {
+    next,
+    float: (min = 0, max = 1) => min + next() * (max - min),
+    int: (min, max) => Math.floor(min + next() * (max - min + 1)), // inclusive
+    pick: (arr) => arr[Math.floor(next() * arr.length)],
+    chance: (p) => next() < p,
+    sign: () => (next() < 0.5 ? -1 : 1),
+  };
+}
 
-  // Float in [min, max).
-  range(min, max) {
-    return min + this.next() * (max - min);
+// FNV-1a string hash — determinism evidence for the headless test.
+export function hashString(str) {
+  let h = 0x811c9dc5;
+  for (let i = 0; i < str.length; i++) {
+    h ^= str.charCodeAt(i);
+    h = Math.imul(h, 0x01000193);
   }
+  return (h >>> 0).toString(16).padStart(8, '0');
+}
 
-  // Integer in [min, max] inclusive.
-  int(min, max) {
-    return min + Math.floor(this.next() * (max - min + 1));
-  }
+export function clamp(v, lo, hi) {
+  return v < lo ? lo : v > hi ? hi : v;
+}
 
-  pick(arr) {
-    return arr[Math.floor(this.next() * arr.length)];
-  }
+export function dist2(ax, ay, bx, by) {
+  const dx = ax - bx;
+  const dy = ay - by;
+  return dx * dx + dy * dy;
+}
 
-  chance(p) {
-    return this.next() < p;
-  }
+// Shortest-arc angle interpolation.
+export function lerpAngle(a, b, t) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  return a + d * t;
+}
 
-  // Random unit vector angle in radians.
-  angle() {
-    return this.next() * Math.PI * 2;
-  }
+// Turn `a` toward `b` by at most `maxStep` radians.
+export function turnToward(a, b, maxStep) {
+  let d = (b - a) % (Math.PI * 2);
+  if (d > Math.PI) d -= Math.PI * 2;
+  if (d < -Math.PI) d += Math.PI * 2;
+  if (d > maxStep) d = maxStep;
+  if (d < -maxStep) d = -maxStep;
+  return a + d;
 }
