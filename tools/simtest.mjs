@@ -1,48 +1,30 @@
-// Palm City Heat — headless verification.
-// Boots the real simulation in Node with DOM stubs and asserts the five
-// things the entry stands on: determinism, driving, crime & police,
-// mission 1 end-to-end, and save/load. Run: node tools/simtest.mjs
+// simtest.mjs — headless verification for Palm City Heat.
+// Boots the real simulation in Node (no DOM: the Game never touches the
+// document outside its guarded browser boot, audio is silent without an
+// AudioContext, and the renderer is simply never called) and asserts:
+//   1. determinism — identical seed + input script ⇒ identical state hash
+//   2. an autopilot can walk, steal a car and drive for 60+ sim-seconds
+//   3. a witnessed crime raises the wanted level and police respond
+//   4. story mission 1 completes via scripted movement to its markers
+//   5. save → fresh game → continue restores cash and story progress
+// Run: node tools/simtest.mjs
 
-// ---- DOM stubs (before importing the game) ----------------------------------
-const gradientStub = { addColorStop() {} };
-function stubContext(canvas) {
-  return new Proxy({}, {
-    get(_t, key) {
-      if (key === 'canvas') return canvas;
-      if (key === 'measureText') return () => ({ width: 42 });
-      if (key === 'createLinearGradient' || key === 'createRadialGradient') return () => gradientStub;
-      return () => {};
-    },
-    set() { return true; },
-  });
-}
-function stubCanvas() {
-  const canvas = {
-    width: 0, height: 0,
-    getContext: () => stubContext(canvas),
-    getBoundingClientRect: () => ({ left: 0, top: 0, width: 960, height: 540 }),
-    addEventListener() {},
-  };
-  return canvas;
-}
-globalThis.window = {
-  innerWidth: 960, innerHeight: 540, devicePixelRatio: 1,
-  addEventListener() {}, location: { search: '' },
-};
-globalThis.document = { getElementById: () => null, addEventListener() {} };
+import { Game } from '../game/src/main.js';
+import { AVENUES, STREETS } from '../game/src/config.js';
+import { policeCount } from '../game/src/police.js';
+import { lanePoint } from '../game/src/vehicles.js';
 
-const { createGame, createPed } = await import('../game/src/main.js');
-const { createRenderer } = await import('../game/src/render.js');
-const { stageShot } = await import('../game/src/shots.js');
-const { WORLD } = await import('../game/src/config.js');
-
-// ---- helpers ------------------------------------------------------------------
 let failures = 0;
-function check(name, cond, detail = '') {
-  if (cond) console.log(`  ok  ${name}`);
-  else { failures++; console.log(`FAIL  ${name} ${detail}`); }
+function assert(cond, msg) {
+  if (cond) {
+    console.log('  ok —', msg);
+  } else {
+    failures++;
+    console.error('  FAIL —', msg);
+  }
 }
-function memStorage() {
+
+function fakeStorage() {
   const map = new Map();
   return {
     getItem: (k) => (map.has(k) ? map.get(k) : null),
@@ -50,274 +32,391 @@ function memStorage() {
     removeItem: (k) => map.delete(k),
   };
 }
-function blank(over = {}) {
-  return {
-    up: false, down: false, left: false, right: false, run: false,
-    interact: false, attack: false, attackPressed: false, pausePressed: false,
-    confirmPressed: false, continuePressed: false, mutePressed: false,
-    mouseX: 0, mouseY: 0, mouseDown: false, aimAngle: null, ...over,
-  };
+
+function makeGame(seed, storage = null) {
+  const game = new Game({ seed, storage });
+  game.startNewGame();
+  return game;
 }
-function moveInput(state, tx, ty, run = true) {
-  const p = state.player;
+
+// One sim step the way the browser loop does it: step, then consume edges.
+function step(game) {
+  game.step();
+  game.input.consume();
+}
+
+function holdKeys(game, codes, steps) {
+  for (const c of ['KeyW', 'KeyA', 'KeyS', 'KeyD', 'ShiftLeft']) game.input.setKey(c, false);
+  for (const c of codes) game.input.setKey(c, true);
+  for (let i = 0; i < steps; i++) step(game);
+}
+
+// Manhattan waypoints along the road grid from (x0,y0) to (x1,y1).
+function gridPath(x0, y0, x1, y1) {
+  const near = (arr, v) => arr.reduce((a, b) => (Math.abs(b - v) < Math.abs(a - v) ? b : a), arr[0]);
+  const ax0 = near(AVENUES, x0);
+  const sy0 = near(STREETS, y0);
+  const ax1 = near(AVENUES, x1);
+  const sy1 = near(STREETS, y1);
+  const pts = [
+    { x: ax0, y: sy0 },
+    { x: ax1, y: sy0 },
+    { x: ax1, y: sy1 },
+    { x: x1, y: y1 },
+  ];
+  return pts.filter((p, i) => i === 0 || Math.hypot(p.x - pts[i - 1].x, p.y - pts[i - 1].y) > 4);
+}
+
+function angleDiff(a, b) {
+  let d = a - b;
+  while (d > Math.PI) d -= Math.PI * 2;
+  while (d < -Math.PI) d += Math.PI * 2;
+  return d;
+}
+
+// What is close ahead of the player's car? 0 = clear, 1 = only parked cars
+// (creep around them), 2 = live traffic or a pedestrian (brake and wait),
+// 3 = only oncoming cars (they have stopped for us: creep through).
+function obstacleAhead(game, range) {
+  const car = game.player.inCar;
+  const fx = Math.cos(car.angle);
+  const fy = Math.sin(car.angle);
+  const scan = (ox, oy, lat) => {
+    const dx = ox - car.x;
+    const dy = oy - car.y;
+    const proj = dx * fx + dy * fy;
+    return proj > 0 && proj < range && Math.abs(dx * -fy + dy * fx) < lat;
+  };
+  let parked = false;
+  let oncoming = false;
+  for (const other of game.cars) {
+    if (other === car || other.dead || !scan(other.x, other.y, 21)) continue;
+    if (other.kind === 'parked') {
+      parked = true;
+      continue;
+    }
+    const dot = Math.cos(other.angle) * fx + Math.sin(other.angle) * fy;
+    if (dot < -0.5) oncoming = true;
+    else return 2;
+  }
+  for (const ped of game.peds) {
+    if (!ped.dead && scan(ped.x, ped.y, 15)) return 2;
+  }
+  if (oncoming) return 3;
+  return parked ? 1 : 0;
+}
+
+// Steer the player's car toward (tx,ty) for one step using real key input,
+// driving like a careful player: capped speed, braking for obstacles.
+function driveStep(game, tx, ty) {
+  const p = game.player;
+  const car = p.inCar;
+  const want = Math.atan2(ty - p.y, tx - p.x);
+  const diff = angleDiff(want, car.angle);
+  const distT = Math.hypot(tx - p.x, ty - p.y);
+  let cruise = 168;
+  if (distT < 240) cruise = 82;
+  if (Math.abs(diff) > 0.55) cruise = Math.min(cruise, 96);
+  const blocked = obstacleAhead(game, 88);
+  let left = false;
+  let right = false;
+  let fwd = false;
+  let rev = false;
+  if (Math.abs(diff) < 1.15) {
+    left = diff < -0.07;
+    right = diff > 0.07;
+    if (blocked === 2) rev = car.speed > 25; // live traffic: brake and wait
+    else if (blocked === 3) fwd = car.speed < 55; // oncoming lane: creep through the crossing
+    else if (blocked === 1) fwd = car.speed < 62; // parked car: creep around it
+    else if (car.speed > cruise + 45) rev = true;
+    else fwd = car.speed < cruise;
+  } else if (Math.abs(car.speed) > 50) {
+    rev = true; // brake first, nose roughly right before flooring it
+    left = diff < 0;
+    right = diff > 0;
+  } else {
+    rev = true; // reverse and swing the nose around (steering inverts)
+    left = diff > 0;
+    right = diff < 0;
+  }
+  game.input.setKey('KeyA', left);
+  game.input.setKey('KeyD', right);
+  game.input.setKey('KeyW', fwd);
+  game.input.setKey('KeyS', rev);
+  step(game);
+  game.input.setKey('KeyW', false);
+  game.input.setKey('KeyS', false);
+}
+
+// A route through every intersection between two points, each waypoint in
+// the correct right-hand lane — the same points the game's traffic uses.
+function gridRoute(x0, y0, x1, y1) {
+  const nearIx = (v) => AVENUES.reduce((bi, a, i) => (Math.abs(a - v) < Math.abs(AVENUES[bi] - v) ? i : bi), 0);
+  const nearIy = (v) => STREETS.reduce((bi, a, i) => (Math.abs(a - v) < Math.abs(STREETS[bi] - v) ? i : bi), 0);
+  let ix = nearIx(x0);
+  let iy = nearIy(y0);
+  const gx = nearIx(x1);
+  const gy = nearIy(y1);
+  const nodes = [[ix, iy]];
+  while (ix !== gx) {
+    ix += Math.sign(gx - ix);
+    nodes.push([ix, iy]);
+  }
+  while (iy !== gy) {
+    iy += Math.sign(gy - iy);
+    nodes.push([ix, iy]);
+  }
+  const pts = [];
+  for (let k = 1; k < nodes.length; k++) {
+    const [px, py] = nodes[k - 1];
+    const [cx, cy] = nodes[k];
+    const dir = cx > px ? 0 : cx < px ? 2 : cy > py ? 1 : 3;
+    pts.push(lanePoint(cx, cy, dir));
+  }
+  pts.push({ x: x1, y: y1 });
+  return pts;
+}
+
+// Drive to a point via the road grid. Returns true on arrival.
+function driveTo(game, tx, ty, arriveR, maxSteps) {
+  const path = gridRoute(game.player.x, game.player.y, tx, ty);
+  let wp = 0;
+  let lastX = game.player.x;
+  let lastY = game.player.y;
+  let stillFor = 0;
+  let recoveries = 0;
+  let nudge = null;
+  for (let i = 0; i < maxSteps; i++) {
+    const p = game.player;
+    if (Math.hypot(p.x - tx, p.y - ty) < arriveR) return true;
+    let target = wp < path.length ? path[wp] : { x: tx, y: ty };
+    if (Math.hypot(p.x - target.x, p.y - target.y) < 46 && wp < path.length) wp++;
+    // Stuck? First sidestep around the blockage, then back out if that fails.
+    if (Math.hypot(p.x - lastX, p.y - lastY) < 3) {
+      stillFor++;
+    } else {
+      stillFor = 0;
+      lastX = p.x;
+      lastY = p.y;
+    }
+    if (stillFor > 150 && !nudge) {
+      const car = p.inCar;
+      const fx = Math.cos(car.angle);
+      const fy = Math.sin(car.angle);
+      nudge = { x: p.x + fx * 80 - fy * 46, y: p.y + fy * 80 + fx * 46, until: i + 110 };
+    }
+    if (nudge) {
+      if (i > nudge.until || Math.hypot(p.x - nudge.x, p.y - nudge.y) < 24) {
+        nudge = null;
+        stillFor = 0;
+      } else {
+        target = nudge;
+      }
+    }
+    if (stillFor > 320) {
+      // Alternate backing out with powering forward: one of them frees us.
+      recoveries++;
+      holdKeys(game, recoveries % 2 ? ['KeyS'] : ['KeyW', 'KeyD'], 42);
+      stillFor = 0;
+      continue;
+    }
+    driveStep(game, target.x, target.y);
+    if (game.screen !== 'playing') return false;
+  }
+  return Math.hypot(game.player.x - tx, game.player.y - ty) < arriveR;
+}
+
+function walkStep(game, tx, ty) {
+  const p = game.player;
   const dx = tx - p.x;
   const dy = ty - p.y;
-  return blank({
-    left: dx < -7, right: dx > 7, up: dy < -7, down: dy > 7, run,
-  });
+  game.input.setKey('KeyA', dx < -6);
+  game.input.setKey('KeyD', dx > 6);
+  game.input.setKey('KeyW', dy < -6);
+  game.input.setKey('KeyS', dy > 6);
+  game.input.setKey('ShiftLeft', true);
+  step(game);
 }
-// Road-following navigator: intersections are open ground, so hop between
-// them, then make the short sidewalk hop to the target.
-function makeNavigator(state) {
-  let queue = [];
-  let currentTarget = null;
-  function nearestIntersection(x, y) {
-    let best = null;
-    let bd = Infinity;
-    for (const vx of WORLD.vRoads) for (const hy of WORLD.hRoads) {
-      const d = (vx - x) ** 2 + (hy - y) ** 2;
-      if (d < bd) { bd = d; best = { x: vx, y: hy }; }
-    }
-    return best;
+
+function walkTo(game, tx, ty, arriveR, maxSteps) {
+  const path = gridPath(game.player.x, game.player.y, tx, ty);
+  let wp = 0;
+  for (let i = 0; i < maxSteps; i++) {
+    const p = game.player;
+    if (Math.hypot(p.x - tx, p.y - ty) < arriveR) return true;
+    const target = wp < path.length ? path[wp] : { x: tx, y: ty };
+    if (Math.hypot(p.x - target.x, p.y - target.y) < 30 && wp < path.length) wp++;
+    walkStep(game, target.x, target.y);
   }
-  return function navigate(tx, ty) {
-    const p = state.player;
-    if (!currentTarget || currentTarget.x !== tx || currentTarget.y !== ty) {
-      currentTarget = { x: tx, y: ty };
-      const start = nearestIntersection(p.x, p.y);
-      const goal = nearestIntersection(tx, ty);
-      queue = [start, { x: goal.x, y: start.y }, goal, { x: tx, y: ty }];
-    }
-    while (queue.length && Math.hypot(queue[0].x - p.x, queue[0].y - p.y) < 26) queue.shift();
-    const wp = queue[0] || { x: tx, y: ty };
-    return moveInput(state, wp.x, wp.y, true);
-  };
+  return Math.hypot(game.player.x - tx, game.player.y - ty) < arriveR;
 }
-// A patrol driver: loop the downtown block (1900,1700)→(3500,1700)→
-// (3500,2400)→(1900,2400), steering at each intersection in turn and
-// braking for whatever is in front instead of trading paint with it.
-function makeDriver() {
-  const loop = [
-    { x: 3500, y: 1700 }, { x: 3500, y: 2400 },
-    { x: 1900, y: 2400 }, { x: 1900, y: 1700 },
+
+// Walk to the nearest car and get in with the real E-key path.
+function enterNearestCar(game) {
+  const p = game.player;
+  // Like a sensible thief: the closest parked car that is not boxed in.
+  let best = null;
+  let bestD = Infinity;
+  for (const car of game.cars) {
+    if (car.dead || car.kind !== 'parked') continue;
+    let clearance = Infinity;
+    for (const other of game.cars) {
+      if (other === car) continue;
+      clearance = Math.min(clearance, Math.hypot(other.x - car.x, other.y - car.y));
+    }
+    if (clearance < 105) continue;
+    const d = Math.hypot(car.x - p.x, car.y - p.y);
+    if (d < bestD) {
+      bestD = d;
+      best = car;
+    }
+  }
+  if (!best) {
+    // Fall back to the plain nearest.
+    for (const car of game.cars) {
+      if (car.dead || car.kind !== 'parked') continue;
+      const d = Math.hypot(car.x - p.x, car.y - p.y);
+      if (d < bestD) {
+        bestD = d;
+        best = car;
+      }
+    }
+  }
+  if (!best) return false;
+  if (!walkTo(game, best.x, best.y, 26, 3000)) return false;
+  game.input.setKey('KeyE', true);
+  step(game);
+  game.input.setKey('KeyE', false);
+  return !!game.player.inCar;
+}
+
+// --- test 1: determinism -----------------------------------------------------
+
+function scriptedRun(seed) {
+  const game = makeGame(seed);
+  // A fixed input script: walk a long square, fire the pistol, swing a fist.
+  const legs = [
+    ['KeyW'], ['KeyD'], ['KeyS'], ['KeyA'],
+    ['KeyW'], ['KeyD'], ['KeyS'], ['KeyA'],
   ];
-  let wi = 0;
-  return function driveInput(state) {
-    const p = state.player;
-    const car = state.vehicles.find((v) => v.id === p.inCar);
-    if (!car) return blank();
-    let wp = loop[wi % loop.length];
-    if (Math.hypot(wp.x - car.x, wp.y - car.y) < 48) { wi++; wp = loop[wi % loop.length]; }
-    const want = Math.atan2(wp.y - car.y, wp.x - car.x);
-    let d = (want - car.angle) % (Math.PI * 2);
-    if (d > Math.PI) d -= Math.PI * 2;
-    if (d < -Math.PI) d += Math.PI * 2;
-    const fx = car.x + Math.cos(car.angle) * 58;
-    const fy = car.y + Math.sin(car.angle) * 58;
-    const blocked = state.vehicles.some((o) => o !== car && !o.dead && (o.x - fx) ** 2 + (o.y - fy) ** 2 < 24 * 24)
-      || state.peds.some((pd) => pd.mode !== 'dead' && pd.mode !== 'down' && (pd.x - fx) ** 2 + (pd.y - fy) ** 2 < 24 * 24);
-    const turning = Math.abs(d) > 0.45 && car.speed > 2.6; // slow for corners, like a driver
-    return blank({ up: !blocked && !turning, down: (blocked && car.speed > 1.5) || turning, left: d < -0.09, right: d > 0.09 });
-  };
-}
-function anyStep(game, input) {
-  if (game.state.screen === 'busted' || game.state.screen === 'wasted') return blank({ confirmPressed: true });
-  if (game.state.screen === 'paused') return blank({ pausePressed: true });
-  return input;
-}
-
-// ---- 1. determinism -------------------------------------------------------------
-console.log('1. determinism (two 3,600-step scripted runs)');
-function scriptedRun() {
-  const g = createGame({ seed: 4242, storage: memStorage() });
-  g.startNewGame();
-  const targets = [g.city.locations.warehouse, g.city.locations.diner, g.city.locations.contact, g.city.locations.gunshop];
-  const nav = makeNavigator(g.state);
-  for (let i = 0; i < 3600; i++) {
-    const t = targets[Math.floor(i / 900) % targets.length];
-    let input = nav(t.x, t.y);
-    if (i % 450 === 0) input = blank({ attackPressed: true, aimAngle: 0.7 });
-    g.step(anyStep(g, input));
+  for (const leg of legs) {
+    holdKeys(game, leg, 210);
+    holdKeys(game, [...leg, 'ShiftLeft'], 210);
   }
-  return g.stateHash();
+  game.input.mouseX = game.viewW / 2 + 220;
+  game.input.mouseY = game.viewH / 2;
+  game.input.mouseClicked = true;
+  step(game);
+  holdKeys(game, ['KeyJ'], 2);
+  for (let i = 0; i < 300; i++) step(game);
+  return game;
 }
-const h1 = scriptedRun();
-const h2 = scriptedRun();
-check('identical state hash', h1 === h2, `${h1} vs ${h2}`);
-console.log(`     hash: ${h1}`);
 
-// ---- 2. autopilot: walk, steal a car, drive 60 s ----------------------------------
-console.log('2. autopilot drives for 60 sim-seconds');
+console.log('test 1: determinism over 3600+ scripted steps');
 {
-  const g = createGame({ seed: 77, storage: memStorage() });
-  g.startNewGame();
-  const s = g.state;
-  // Pick a parked car with a clear run ahead of it (not boxed in by the next
-  // car in the rank) — the test is about driving, not parallel-parking luck.
-  const parked = s.vehicles.find((v) => {
-    if (v.driver !== 'none' || v.wrecked) return false;
-    const fx = v.x + Math.cos(v.angle) * 130;
-    const fy = v.y + Math.sin(v.angle) * 130;
-    return !s.vehicles.some((o) => o !== v && (o.x - fx) ** 2 + (o.y - fy) ** 2 < 46 * 46);
-  });
-  s.player.x = parked.x + 20;
-  s.player.y = parked.y + 6;
-  g.step(blank({ interact: true }));
-  check('entered a parked car', s.player.inCar === parked.id, `inCar=${s.player.inCar}`);
-  s.heat = 0; // this test is about driving, not the getaway: forgive the theft
-  // Start the drive on Palm Avenue, rolling east into the patrol loop.
-  parked.x = 2050;
-  parked.y = 1720;
-  parked.angle = 0;
-  s.player.x = parked.x;
-  s.player.y = parked.y;
-  const drive = makeDriver();
-  const nav = makeNavigator(s);
+  const a = scriptedRun(42);
+  const b = scriptedRun(42);
+  const c = scriptedRun(99);
+  console.log('  hash A:', a.stateHash(), ' hash B:', b.stateHash(), ' hash C (other seed):', c.stateHash());
+  assert(a.stateHash() === b.stateHash(), 'same seed + same inputs ⇒ same state hash');
+  assert(a.stateHash() !== c.stateHash(), 'different seed ⇒ different state hash');
+}
+
+// --- test 2: autopilot drives for a minute -----------------------------------
+
+console.log('test 2: autopilot walk, enter car, drive 60+ seconds');
+{
+  const game = makeGame(7);
+  const entered = enterNearestCar(game);
+  assert(entered, 'autopilot walked to a car and got in');
+  // A circuit of the grid block nearest the car, in proper lanes like the
+  // traffic AI: east, south, west, north around one block, over and over
+  // for well over a minute of sim time.
+  const nearIx = (v) => AVENUES.reduce((bi, a, i) => (Math.abs(a - v) < Math.abs(AVENUES[bi] - v) ? i : bi), 0);
+  const nearIy = (v) => STREETS.reduce((bi, a, i) => (Math.abs(a - v) < Math.abs(STREETS[bi] - v) ? i : bi), 0);
+  const ix = Math.min(5, nearIx(game.player.x));
+  const iy = Math.min(3, nearIy(game.player.y));
+  const circuit = [
+    lanePoint(ix + 1, iy, 0),
+    lanePoint(ix + 1, iy + 1, 1),
+    lanePoint(ix, iy + 1, 2),
+    lanePoint(ix, iy, 3),
+  ];
+  let wp = 0;
   let travelled = 0;
-  let inCarSteps = 0;
-  let lx = s.player.x;
-  let ly = s.player.y;
-  for (let i = 0; i < 3600; i++) {
-    // If the run was interrupted (an arrest leaves you on foot at the
-    // station), walk back to the car and get in again, like a player would.
-    let input;
-    if (!s.player.inCar && s.screen === 'play') {
-      const near = Math.hypot(s.player.x - parked.x, s.player.y - parked.y) < 40;
-      input = near ? blank({ interact: true }) : nav(parked.x, parked.y);
-    } else {
-      input = drive(s);
-    }
-    g.step(anyStep(g, input));
-    travelled += Math.hypot(s.player.x - lx, s.player.y - ly);
-    lx = s.player.x;
-    ly = s.player.y;
-    if (s.player.inCar) inCarSteps++;
+  let lastX = game.player.x;
+  let lastY = game.player.y;
+  const DRIVE_STEPS = 3900; // 65 sim-seconds
+  for (let i = 0; i < DRIVE_STEPS; i++) {
+    const target = circuit[wp % circuit.length];
+    if (Math.hypot(game.player.x - target.x, game.player.y - target.y) < 48) wp++;
+    driveStep(game, target.x, target.y);
+    travelled += Math.hypot(game.player.x - lastX, game.player.y - lastY);
+    lastX = game.player.x;
+    lastY = game.player.y;
+    if (game.screen !== 'playing') break;
   }
-  check('drove the full minute', inCarSteps > 3200, `inCarSteps=${inCarSteps}`);
-  check('covered real distance', travelled > 2500, `travelled=${Math.round(travelled)}px`);
+  assert(game.screen === 'playing', 'game still running after the drive (no crash, no bust)');
+  assert(travelled > 4000, 'car actually drove (' + Math.round(travelled) + 'px in 65 sim-seconds)');
+  assert(wp >= 5, 'car kept circulating the grid (' + wp + ' waypoints reached)');
+  console.log('  circuit drive:', Math.round(travelled) + 'px,', wp, 'waypoints, ended at', Math.round(game.player.x), Math.round(game.player.y));
 }
 
-// ---- 3. witnessed crime → wanted → police ------------------------------------------
-console.log('3. witnessed crime raises wanted and brings police');
+// --- test 3: crime → wanted → police ------------------------------------------
+
+console.log('test 3: witnessed crime raises wanted, police respond');
 {
-  const g = createGame({ seed: 99, storage: memStorage() });
-  g.startNewGame();
-  const s = g.state;
-  s.player.ammo = 0; // fists only: this is a mugging, not a shooting
-  const px = s.player.x;
-  const py = s.player.y;
-  createPed(s, px + 24, py, {}); // the victim, in melee range
-  createPed(s, px + 70, py + 10, {}); // the witness
-  g.step(blank({ attackPressed: true, aimAngle: 0 }));
-  check('heat registered', s.heat >= 16, `heat=${s.heat}`);
-  let copAt = -1;
-  for (let i = 0; i < 400 && copAt < 0; i++) {
-    g.step(blank());
-    if (s.vehicles.some((v) => v.kind === 'cop' && v.driver === 'cop')) copAt = i;
-  }
-  check('wanted >= 1 star', s.wanted >= 1, `wanted=${s.wanted}`);
-  check('police spawned', copAt >= 0, `after ${copAt} steps`);
+  const game = makeGame(11);
+  step(game); // settle the camera on the player
+  const p = game.player;
+  const { spawnPed } = await import('../game/src/peds.js');
+  const victim = spawnPed(game, p.x + 26, p.y, {});
+  // Aim at the victim through the real mouse path and click.
+  game.input.mouseX = victim.x - (game.camera.x - game.viewW / 2);
+  game.input.mouseY = victim.y - (game.camera.y - game.viewH / 2);
+  game.input.mouseClicked = true;
+  step(game);
+  for (let i = 0; i < 12; i++) step(game);
+  assert(game.wanted.stars >= 1, 'shooting a pedestrian in the open raised the wanted level (stars=' + game.wanted.stars + ')');
+  assert(victim.dead || victim.hp < 30, 'the shot connected (victim hp=' + Math.round(victim.hp) + ')');
+  for (let i = 0; i < 90; i++) step(game);
+  assert(policeCount(game) >= 1, 'a police interceptor spawned and is hunting (count=' + policeCount(game) + ')');
 }
 
-// ---- 4. mission 1 end-to-end ---------------------------------------------------------
-console.log('4. mission 1 completes via scripted movement');
+// --- test 4: mission 1 completes ----------------------------------------------
+
+console.log('test 4: story mission 1 completes via scripted movement');
 {
-  const g = createGame({ seed: 111, storage: memStorage() });
-  g.startNewGame();
-  const s = g.state;
-  const L = g.city.locations;
-  const nav = makeNavigator(s);
-  const cash0 = s.player.cash;
-  let steps = 0;
-  // Talk to Vivi: walk to her doorstep, then press E.
-  while (!s.mission.dialogue && !s.mission.active && steps < 3000) {
-    const near = Math.hypot(s.player.x - L.contact.x, s.player.y - L.contact.y) < 62;
-    g.step(anyStep(g, near ? blank({ interact: true }) : nav(L.contact.x, L.contact.y)));
-    steps++;
-  }
-  check('dialogue opened', !!s.mission.dialogue);
-  let guard = 0;
-  while (s.mission.dialogue && guard++ < 12) g.step(blank({ interact: true }));
-  check('mission activated', !!s.mission.active && s.mission.active.def.id === 'm1', JSON.stringify(s.mission.active && s.mission.active.def.id));
-  // Pickup, then delivery — each leg gets its own generous budget.
-  steps = 0;
-  while (s.mission.active && steps < 16000) {
-    const phase = s.mission.active.phaseIndex;
-    const target = phase === 0 ? L.warehouse : L.diner;
-    g.step(anyStep(g, nav(target.x, target.y)));
-    steps++;
-  }
-  check('mission 1 finished', s.mission.storyIndex === 1, `storyIndex=${s.mission.storyIndex} steps=${steps}`);
-  check('paid $450', s.player.cash >= cash0 + 450, `cash ${cash0} -> ${s.player.cash}`);
-  console.log(`     completed in ${steps} steps`);
+  const game = makeGame(5);
+  const cashBefore = game.player.cash;
+  // On foot and running: the markers only ask for arrival, and a runner
+  // crosses the city faster than the delivery clock runs down.
+  const started = walkTo(game, 3718, 1673, 30, 9000); // Café Brisa, the green marker
+  assert(started && game.missions.active, 'mission started at Café Brisa: ' + (game.missions.active && game.missions.active.def.title));
+  const picked = walkTo(game, 1798, 1033, 40, 9000); // Mercado Sol pickup
+  assert(picked && game.missions.active && game.missions.active.stageIndex === 1, 'package picked up, delivery stage active');
+  const delivered = walkTo(game, 2438, 1033, 44, 8000); // Harbor Tower, against the 150 s clock
+  assert(delivered && !game.missions.active && game.missions.storyIndex === 1, 'delivery made, mission complete, story advanced');
+  assert(game.player.cash === cashBefore + 450, 'payout landed ($' + cashBefore + ' → $' + game.player.cash + ')');
 }
 
-// ---- 5. save / reset / load -------------------------------------------------------------
-console.log('5. save → fresh game → load restores progress');
+// --- test 5: save / load --------------------------------------------------------
+
+console.log('test 5: save then continue restores progress');
 {
-  const storage = memStorage();
-  const g = createGame({ seed: 13, storage });
-  g.startNewGame();
-  const s = g.state;
-  s.player.cash = 777;
-  s.player.ammo = 9;
-  s.mission.storyIndex = 2;
-  s.player.x = s.city.locations.diner.x + 10;
-  s.player.y = s.city.locations.diner.y + 4;
-  const sx = s.player.x;
-  const sy = s.player.y;
-  g.save();
-  const g2 = createGame({ seed: 555, storage }); // different seed: the save must carry it
-  const okLoad = g2.load();
-  check('load succeeded', okLoad === true);
-  check('cash restored', g2.state.player.cash === 777, `cash=${g2.state.player.cash}`);
-  check('story progress restored', g2.state.mission.storyIndex === 2, `storyIndex=${g2.state.mission.storyIndex}`);
-  check('position restored', Math.abs(g2.state.player.x - sx) < 4 && Math.abs(g2.state.player.y - sy) < 4,
-    `(${g2.state.player.x},${g2.state.player.y}) vs (${sx},${sy})`);
+  const storage = fakeStorage();
+  const a = makeGame(3, storage);
+  a.player.cash = 777;
+  a.missions.storyIndex = 2;
+  a.missions.jobsDone = 2;
+  a.saveGame();
+  const b = new Game({ seed: 3, storage });
+  assert(b.hasSave, 'fresh game sees the save');
+  b.startContinue();
+  assert(b.player.cash === 777, 'cash restored ($' + b.player.cash + ')');
+  assert(b.missions.storyIndex === 2, 'story progress restored (next mission index ' + b.missions.storyIndex + ')');
+  assert(b.screen === 'playing', 'continue drops straight into the city');
 }
 
-// ---- 6. render smoke + shot scenes -------------------------------------------------------
-console.log('6. renderer paints every screen; shot scenes stage');
-{
-  const g = createGame({ seed: 2024, storage: memStorage() });
-  const renderer = createRenderer(stubCanvas());
-  g.state.view = renderer.view;
-  g.startNewGame();
-  for (let i = 0; i < 120; i++) g.step(blank());
-  let threw = '';
-  try {
-    renderer.draw(g.state); // play
-    g.state.screen = 'paused';
-    renderer.draw(g.state);
-    g.state.screen = 'busted';
-    g.state.endText = 'test';
-    renderer.draw(g.state);
-    g.state.screen = 'wasted';
-    renderer.draw(g.state);
-    g.state.screen = 'title';
-    renderer.draw(g.state);
-  } catch (e) { threw = e.message; }
-  check('all screens paint without errors', threw === '', threw);
-
-  for (const name of ['start', 'drive', 'chase']) {
-    const gg = createGame({ seed: 1, storage: memStorage() });
-    gg.state.view = renderer.view;
-    let err = '';
-    try {
-      stageShot(gg, name);
-      renderer.draw(gg.state);
-    } catch (e) { err = e.message; }
-    check(`shot=${name} stages and paints`, err === '', err);
-    if (name === 'chase') {
-      check('chase scene has police and 3 stars',
-        gg.state.vehicles.some((v) => v.kind === 'cop') && gg.state.wanted === 3,
-        `cops=${gg.state.vehicles.filter((v) => v.kind === 'cop').length} wanted=${gg.state.wanted}`);
-    }
-    if (name === 'drive') {
-      check('drive scene is behind the wheel', gg.state.player.inCar !== null);
-    }
-  }
-}
-
-console.log(failures === 0 ? '\nALL CHECKS PASSED' : `\n${failures} CHECK(S) FAILED`);
+console.log(failures === 0 ? '\nALL TESTS PASSED' : '\n' + failures + ' ASSERTION(S) FAILED');
 process.exit(failures === 0 ? 0 : 1);
