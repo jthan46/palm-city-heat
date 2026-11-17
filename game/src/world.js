@@ -1,267 +1,288 @@
-// Palm City Heat — the city itself.
-// One job: generate Palm City (districts, buildings, roads, props, named
-// places) from a seed, and answer spatial questions — collision, water,
-// road lanes, walkable points — for every other system.
+// world.js — Palm City itself: the road grid, districts, buildings, beach,
+// park, props and points of interest, generated deterministically from a seed.
+// One job: describe the static city and answer spatial questions about it
+// (collision, road/sidewalk/water tests, spawn points) for every other system.
 
-import { WORLD, PALETTE } from './config.js';
-import { clamp, dist2 } from './random.js';
+import { AVENUES, STREETS, ROAD_HALF, WORLD_W, WORLD_H, BUILDING_STYLES, PALETTE } from './config.js';
 
-export const LANE_OFF = 20; // lane centre offset from road centre (parked cars hug the kerb outside it)
-export const SAND_Y = WORLD.hRoads[WORLD.hRoads.length - 1] + WORLD.roadW / 2; // beach begins
+export const BEACH_X = 4215; // east of the coastal avenue: promenade and sand
+export const WATER_X = 4520; // open water beyond the sand
 
-const BUILDING_STYLES = {
-  downtown: ['#e8b4a0', '#d99a86', '#f0c297', '#c97e6f', '#e5a583'],
-  commercial: ['#f2d5a0', '#eec27f', '#f7e3b0', '#e8b06a'],
-  suburbs: ['#f5e6c8', '#eed9b8', '#f9efdb', '#e6cfa5'],
-  beachfront: ['#f7ead2', '#ffe3ae', '#f3d9c8', '#ffeec9'],
-  park: [],
+// Block (col,row) spans between avenue col..col+1 and street row..row+1.
+export function blockRect(col, row) {
+  return {
+    x0: AVENUES[col] + ROAD_HALF,
+    y0: STREETS[row] + ROAD_HALF,
+    x1: AVENUES[col + 1] - ROAD_HALF,
+    y1: STREETS[row + 1] - ROAD_HALF,
+  };
+}
+
+function districtOf(col, row) {
+  if (col === 1 && row === 3) return 'park';
+  if (col === 5) return 'beach';
+  if (col === 0) return 'suburb';
+  if (row === 1) return 'commercial';
+  if ((col === 2 || col === 3) && row !== 3) return 'downtown';
+  return 'midtown';
+}
+
+const STYLE_BY_DISTRICT = {
+  downtown: 'tower',
+  midtown: 'office',
+  commercial: 'shop',
+  suburb: 'house',
+  beach: 'hut',
 };
 
-// Named places the story and HUD point at. Block is [column, row] in the block grid.
-const LOCATION_SPECS = [
-  { id: 'contact', name: 'Marlin Hotel', kind: 'hotel', block: [2, 4], label: 'Vivi is here' },
-  { id: 'warehouse', name: 'Marina Warehouse', kind: 'warehouse', block: [6, 4] },
-  { id: 'diner', name: 'Seabreeze Diner', kind: 'diner', block: [0, 4] },
-  { id: 'aurelia', name: 'Aurelia Hotel', kind: 'hotel', block: [6, 1] },
-  { id: 'chopshop', name: "Sal's Chop Shop", kind: 'garage', block: [0, 0] },
-  { id: 'safehouse', name: 'Palm Court Safehouse', kind: 'house', block: [5, 2] },
-  { id: 'hospital', name: 'Palm City General', kind: 'hospital', block: [1, 2] },
-  { id: 'station', name: 'Palm City PD', kind: 'station', block: [3, 2] },
-  { id: 'gunshop', name: 'Sunset Arms', kind: 'shop', block: [5, 3] },
-  { id: 'beachclub', name: 'Club Del Mar', kind: 'club', block: [4, 4] },
+// Named places the story and the HUD care about. The x/y is each place's
+// front door: a walkable point on the sidewalk just outside its building
+// (col/row/lot ties the name to the building drawn behind the door).
+export const POIS = [
+  { id: 'motel', name: 'Sunset Palms Motel', x: 518, y: 395, col: 0, row: 0, lot: 0 },
+  { id: 'tower', name: 'Coral Tower', x: 1798, y: 395, col: 2, row: 0, lot: 0 },
+  { id: 'market', name: 'Mercado Sol', x: 1798, y: 1033, col: 2, row: 1, lot: 0 },
+  { id: 'office', name: 'Harbor Tower', x: 2438, y: 1033, col: 3, row: 1, lot: 0 },
+  { id: 'hotel', name: 'Hotel Brisa', x: 3718, y: 1033, col: 5, row: 1, lot: 0 },
+  { id: 'hospital', name: 'Palmetto General', x: 1798, y: 1673, col: 2, row: 2, lot: 0 },
+  { id: 'pd', name: 'Palm City PD', x: 2438, y: 1673, col: 3, row: 2, lot: 0 },
+  { id: 'cafe', name: 'Café Brisa', x: 3718, y: 1673, col: 5, row: 2, lot: 0 },
+  { id: 'house', name: 'Maple Street House', x: 518, y: 1673, col: 0, row: 2, lot: 0 },
+  { id: 'garage', name: 'Andrade Auto', x: 518, y: 2313, col: 0, row: 3, lot: 0 },
+  { id: 'pavilion', name: 'Palmetto Park Pavilion', x: 1280, y: 2560, col: 1, row: 3, lot: -1 },
 ];
 
-// Block column/row spans between road bands, world edges included.
-function blockSpans(roads, limit) {
-  const spans = [];
-  let prev = 0;
-  for (const c of roads) {
-    spans.push([prev, c - WORLD.roadW / 2]);
-    prev = c + WORLD.roadW / 2;
-  }
-  spans.push([prev, limit]);
-  return spans;
+export function poiById(world, id) {
+  return world.pois.find((p) => p.id === id);
 }
 
-export function districtAt(x, y) {
-  if (y >= SAND_Y) return 'beach';
-  if (x > 3445 && y < 1755) return 'park';
-  const cols = blockSpans(WORLD.vRoads, WORLD.w);
-  const rows = blockSpans(WORLD.hRoads, WORLD.h);
-  let ci = cols.findIndex(([a, b]) => x >= a && x <= b);
-  let ri = rows.findIndex(([a, b]) => y >= a && y <= b);
-  if (ci === -1) ci = 3;
-  if (ri === -1) ri = 2;
-  if (ri === 4) return 'beachfront';
-  if (ci >= 5 && ri <= 1) return 'park';
-  if (ci >= 5) return 'commercial';
-  if (ci >= 2 && ci <= 4 && ri >= 1 && ri <= 3) return 'downtown';
-  return 'suburbs';
-}
-
-function addBuilding(city, rng, spec) {
-  const b = {
-    x: spec.x, y: spec.y, w: spec.w, h: spec.h,
-    hgt: spec.hgt, kind: spec.kind || 'block',
-    color: spec.color, roof: spec.roof || '#8a5a4a',
-    district: spec.district, name: spec.name || null,
+export function buildWorld(rng) {
+  const world = {
+    buildings: [], // {x,y,w,h,style,floors,color,name|null,district}
+    trees: [], // {x,y,kind:'shade'|'palm'}
+    lamps: [], // {x,y}
+    props: [], // {x,y,kind}
+    lots: [], // paved parking/plaza rects {x,y,w,h}
+    parkedSpots: [], // {x,y,angle}
+    blocks: [], // {col,row,rect,district}
+    pois: POIS.map((p) => ({ ...p })),
+    pond: null,
   };
-  city.buildings.push(b);
-  return b;
-}
 
-function fillBlock(city, rng, bx, by, bw, bh, district, location) {
-  const inset = 30;
-  const ix = bx + inset;
-  const iy = by + inset;
-  const iw = bw - inset * 2;
-  const ih = bh - inset * 2;
-  if (iw < 60 || ih < 60) return;
-  const colors = BUILDING_STYLES[district] || BUILDING_STYLES.suburbs;
-  const mk = (x, y, w, h, hgt, kind) => addBuilding(city, rng, {
-    x, y, w, h, hgt, kind, district,
-    color: rng.pick(colors),
-    roof: district === 'downtown' ? '#6e4a3f' : '#9c6a4e',
-    name: null,
-  });
-
-  if (location) {
-    // The named place takes the middle of the block; one filler beside it.
-    const lw = Math.min(iw * 0.62, 300);
-    const lh = Math.min(ih * 0.6, 240);
-    const b = addBuilding(city, rng, {
-      x: ix + (iw - lw) / 2, y: iy + (ih - lh) / 2, w: lw, h: lh,
-      hgt: location.kind === 'hotel' ? 64 : 30, kind: location.kind,
-      color: '#ffe9bd', roof: '#7a4a3a', district, name: location.name,
-    });
-    city.locations[location.id] = {
-      id: location.id, name: location.name, kind: location.kind,
-      x: b.x + b.w / 2, y: b.y + b.h + 20, // the doorstep, on the sidewalk
-      bx: b.x + b.w / 2, by: b.y + b.h / 2,
-    };
-    if (iw > 420) mk(ix, iy + ih * 0.2, iw * 0.2, ih * 0.5, 20, 'block');
-    return;
-  }
-
-  if (district === 'downtown') {
-    const gw = iw / 2;
-    const gh = ih / 2;
-    for (let cx = 0; cx < 2; cx++) for (let cy = 0; cy < 2; cy++) {
-      if (rng.chance(0.12)) continue;
-      mk(ix + cx * gw + 14, iy + cy * gh + 14, gw - 28, gh - 28, rng.int(70, 135), 'tower');
-    }
-  } else if (district === 'commercial') {
-    const n = 3;
-    const gw = iw / n;
-    for (let cx = 0; cx < n; cx++) mk(ix + cx * gw + 12, iy + 16, gw - 24, ih - 32, rng.int(24, 46), 'shop');
-  } else if (district === 'beachfront') {
-    const n = 2;
-    const gw = iw / n;
-    for (let cx = 0; cx < n; cx++) mk(ix + cx * gw + 16, iy + 20, gw - 32, ih - 40, rng.int(20, 36), 'motel');
-  } else {
-    // suburbs: small houses with gaps between them
-    const n = 3;
-    const gw = iw / n;
-    const gh = ih / 2;
-    for (let cx = 0; cx < n; cx++) for (let cy = 0; cy < 2; cy++) {
-      if (rng.chance(0.15)) continue;
-      mk(ix + cx * gw + 22, iy + cy * gh + 20, gw - 52, gh - 44, rng.int(11, 19), 'house');
-    }
-  }
-}
-
-export function generateCity(rng) {
-  const city = {
-    buildings: [],
-    props: [],
-    locations: {},
-    cols: blockSpans(WORLD.vRoads, WORLD.w),
-    rows: blockSpans(WORLD.hRoads, WORLD.h),
-  };
-  const locByBlock = new Map();
-  for (const spec of LOCATION_SPECS) locByBlock.set(spec.block.join(','), spec);
-
-  for (let ci = 0; ci < city.cols.length; ci++) {
-    for (let ri = 0; ri < city.rows.length; ri++) {
-      const [bx, bx2] = city.cols[ci];
-      const [by, by2] = city.rows[ri];
-      const bw = bx2 - bx;
-      const bh = by2 - by;
-      if (by >= SAND_Y) continue; // the beach itself: no blocks
-      const district = districtAt(bx + bw / 2, by + bh / 2);
-      if (district === 'park') {
-        // park blocks: lawns, a pond, paths and trees — no buildings
-        city.props.push({ kind: 'pond', x: bx + bw * 0.3, y: by + bh * 0.3, r: 52 });
-        for (let t = 0; t < 14; t++) {
-          city.props.push({ kind: 'tree', x: bx + rng.float(30, bw - 30), y: by + rng.float(30, bh - 30), r: rng.int(13, 20) });
+  // Streetlights at intersection corners.
+  for (const ax of AVENUES) {
+    for (const sy of STREETS) {
+      for (const sx of [-1, 1]) {
+        for (const sy2 of [-1, 1]) {
+          world.lamps.push({ x: ax + sx * (ROAD_HALF + 6), y: sy + sy2 * (ROAD_HALF + 6) });
         }
-        continue;
       }
-      fillBlock(city, rng, bx, by, bw, bh, district, locByBlock.get(ci + ',' + ri) || null);
     }
   }
 
-  // Props: palms along the beach and Ocean-side sidewalks, lamps on corners, trees in suburbs.
-  for (let x = 90; x < WORLD.w; x += rng.int(120, 200)) {
-    city.props.push({ kind: 'palm', x, y: SAND_Y + rng.float(24, 90), r: 15 });
+  for (let col = 0; col < 6; col++) {
+    for (let row = 0; row < 4; row++) {
+      const rect = blockRect(col, row);
+      const district = districtOf(col, row);
+      world.blocks.push({ col, row, rect, district });
+      if (district === 'park') {
+        buildPark(world, rng, rect);
+      } else {
+        buildBlock(world, rng, rect, district, col, row);
+      }
+    }
   }
-  for (const vx of WORLD.vRoads) for (const hy of WORLD.hRoads) {
-    city.props.push({ kind: 'lamp', x: vx - WORLD.roadW / 2 - 10, y: hy - WORLD.roadW / 2 - 10, r: 5 });
-    city.props.push({ kind: 'lamp', x: vx + WORLD.roadW / 2 + 10, y: hy + WORLD.roadW / 2 + 10, r: 5 });
+
+  // Beach: palms along the promenade, umbrellas and huts on the sand.
+  for (let y = 140; y < WORLD_H - 100; y += 150) {
+    world.trees.push({ x: BEACH_X + 26 + rng.range(-8, 8), y: y + rng.range(-20, 20), kind: 'palm' });
+    if (rng.chance(0.6)) world.props.push({ x: rng.range(WATER_X - 190, WATER_X - 60), y: y + rng.range(-30, 30), kind: 'umbrella' });
   }
-  for (let i = 0; i < 90; i++) {
-    const x = rng.float(40, WORLD.w - 40);
-    const y = rng.float(40, SAND_Y - 40);
-    const d = districtAt(x, y);
-    if (d === 'suburbs' || d === 'beachfront') city.props.push({ kind: rng.chance(0.5) ? 'palm' : 'tree', x, y, r: rng.int(11, 17) });
-  }
-  return city;
+
+  return world;
 }
 
-// ---- spatial queries -------------------------------------------------------
+function buildPark(world, rng, rect) {
+  const cx = (rect.x0 + rect.x1) / 2;
+  const cy = (rect.y0 + rect.y1) / 2;
+  world.pond = { x: cx + 110, y: cy - 90, r: 62 };
+  world.props.push({ x: cx, y: cy, kind: 'pavilion' });
+  for (let i = 0; i < 26; i++) {
+    const x = rng.range(rect.x0 + 30, rect.x1 - 30);
+    const y = rng.range(rect.y0 + 30, rect.y1 - 30);
+    if (Math.hypot(x - world.pond.x, y - world.pond.y) < 90) continue;
+    if (Math.hypot(x - cx, y - cy) < 60) continue;
+    world.trees.push({ x, y, kind: 'shade' });
+  }
+  for (let i = 0; i < 6; i++) {
+    world.props.push({ x: rng.range(rect.x0 + 40, rect.x1 - 40), y: rng.range(rect.y0 + 40, rect.y1 - 40), kind: 'bench' });
+  }
+}
+
+function buildBlock(world, rng, rect, district, col, row) {
+  const style = STYLE_BY_DISTRICT[district];
+  const spec = BUILDING_STYLES[style];
+  const inset = 36; // sidewalk + setback from the block edge
+  const alley = 26;
+  const lotW = (rect.x1 - rect.x0 - inset * 2 - alley) / 2;
+  const lotH = (rect.y1 - rect.y0 - inset * 2 - alley) / 2;
+  for (let lot = 0; lot < 4; lot++) {
+    const lx = rect.x0 + inset + (lot % 2) * (lotW + alley);
+    const ly = rect.y0 + inset + Math.floor(lot / 2) * (lotH + alley);
+    const poi = POIS.find((p) => p.col === col && p.row === row && p.lot === lot);
+    // The Hotel Brisa south-east lot is its parking lot (the golden coupe waits there).
+    const isHotelLot = col === 5 && row === 1 && lot === 3;
+    if (!poi && (isHotelLot || rng.chance(0.14))) {
+      world.lots.push({ x: lx, y: ly, w: lotW, h: lotH });
+      const spots = Math.floor(lotW / 46);
+      for (let s = 0; s < spots; s++) {
+        world.parkedSpots.push({ x: lx + 26 + s * 46, y: ly + 30, angle: Math.PI / 2 });
+        if (rng.chance(0.7)) {
+          world.parkedSpots.push({ x: lx + 26 + s * 46, y: ly + lotH - 30, angle: -Math.PI / 2 });
+        }
+      }
+      continue;
+    }
+    const shrink = rng.range(0, 14);
+    const building = {
+      x: lx + shrink / 2,
+      y: ly + shrink / 2,
+      w: lotW - shrink,
+      h: lotH - shrink,
+      style,
+      floors: rng.int(spec.minH, spec.maxH),
+      color: rng.pick(spec.colors),
+      roof: rng.pick(['ac', 'tank', 'garden', 'plain']),
+      name: poi ? poi.name : null,
+      district,
+    };
+    world.buildings.push(building);
+    // Shade trees on the sidewalk in leafy districts.
+    if ((district === 'suburb' || district === 'midtown') && rng.chance(0.8)) {
+      world.trees.push({ x: rect.x0 + 16, y: ly + lotH / 2, kind: 'shade' });
+    }
+    if (district === 'beach') {
+      world.trees.push({ x: lx - 14, y: ly + lotH / 2, kind: 'palm' });
+    }
+  }
+  // Parked cars along the block's south curb — on the sidewalk band inside
+  // the block edge, clear of the traffic lanes on the road beyond it.
+  const curbY = rect.y1 - 16;
+  for (let x = rect.x0 + 40; x < rect.x1 - 30; x += 64) {
+    if (rng.chance(0.55)) world.parkedSpots.push({ x, y: curbY, angle: 0 });
+  }
+}
+
+// --- spatial queries -------------------------------------------------------
 
 export function isWater(x, y) {
-  return y >= WORLD.waterY;
+  return x >= WATER_X;
 }
 
-// Push a circle out of every building it overlaps and out of the water/world edge.
-// Returns {x, y, hit} — hit is true when any resolution moved the circle.
-export function collideCircle(city, x, y, r) {
-  let hit = false;
-  if (x < r) { x = r; hit = true; }
-  if (y < r) { y = r; hit = true; }
-  if (x > WORLD.w - r) { x = WORLD.w - r; hit = true; }
-  if (y > WORLD.h - r) { y = WORLD.h - r; hit = true; }
-  if (y > WORLD.waterY - r && x >= 0) { y = WORLD.waterY - r; hit = true; }
-  for (const b of city.buildings) {
-    const nx = clamp(x, b.x, b.x + b.w);
-    const ny = clamp(y, b.y, b.y + b.h);
-    const d2 = dist2(x, y, nx, ny);
-    if (d2 >= r * r) continue;
-    hit = true;
-    if (d2 > 0.0001) {
-      const d = Math.sqrt(d2);
-      x = nx + ((x - nx) / d) * r;
-      y = ny + ((y - ny) / d) * r;
-    } else {
-      // centre inside the rect: push out along the smallest penetration axis
-      const left = x - b.x;
-      const right = b.x + b.w - x;
-      const top = y - b.y;
-      const bottom = b.y + b.h - y;
-      const m = Math.min(left, right, top, bottom);
-      if (m === left) x = b.x - r;
-      else if (m === right) x = b.x + b.w + r;
-      else if (m === top) y = b.y - r;
-      else y = b.y + b.h + r;
-    }
+export function isSand(x, y) {
+  return x >= BEACH_X && x < WATER_X;
+}
+
+export function isRoad(x, y) {
+  if (x >= BEACH_X) return false;
+  for (const ax of AVENUES) if (Math.abs(x - ax) <= ROAD_HALF) return true;
+  for (const sy of STREETS) if (Math.abs(y - sy) <= ROAD_HALF) return true;
+  return false;
+}
+
+export function buildingAt(world, x, y, pad = 0) {
+  for (const b of world.buildings) {
+    if (x >= b.x - pad && x <= b.x + b.w + pad && y >= b.y - pad && y <= b.y + b.h + pad) return b;
   }
-  return { x, y, hit };
-}
-
-export function pointInBuilding(city, x, y, pad = 0) {
-  for (const b of city.buildings) {
-    if (x > b.x - pad && x < b.x + b.w + pad && y > b.y - pad && y < b.y + b.h + pad) return b;
+  if (world.pond && Math.hypot(x - world.pond.x, y - world.pond.y) < world.pond.r + pad) {
+    return { pond: true };
   }
   return null;
 }
 
-export function isOnRoad(x, y) {
-  if (y >= SAND_Y) return false;
-  for (const vx of WORLD.vRoads) if (Math.abs(x - vx) <= WORLD.roadW / 2) return true;
-  for (const hy of WORLD.hRoads) if (Math.abs(y - hy) <= WORLD.roadW / 2) return true;
-  return false;
-}
-
-// Lane centre coordinate for a car travelling on a road.
-// kind 'v': road centre x, dir +1 heads south, -1 north (right-hand traffic).
-export function laneCoord(kind, centre, dir) {
-  if (kind === 'v') return centre + (dir > 0 ? -LANE_OFF : LANE_OFF);
-  return centre + (dir > 0 ? LANE_OFF : -LANE_OFF);
-}
-
-// A point on a sidewalk near (x, y): snap to the nearest block-border walk line.
-export function randomWalkPoint(rng, x, y, range = 520) {
-  const off = WORLD.roadW / 2 + 17;
-  const lines = [];
-  for (const vx of WORLD.vRoads) { lines.push({ axis: 'x', at: vx - off }); lines.push({ axis: 'x', at: vx + off }); }
-  for (const hy of WORLD.hRoads) { lines.push({ axis: 'y', at: hy - off }); lines.push({ axis: 'y', at: hy + off }); }
-  const near = lines.filter((l) => Math.abs((l.axis === 'x' ? x : y) - l.at) < range + 200);
-  const l = rng.pick(near.length ? near : lines);
-  if (l.axis === 'x') return { x: l.at, y: clamp(y + rng.float(-range, range), 30, SAND_Y - 20) };
-  return { x: clamp(x + rng.float(-range, range), 30, WORLD.w - 30), y: l.at };
-}
-
-// A random point on a road lane, used for traffic spawns away from the player.
-export function randomLanePoint(rng) {
-  if (rng.chance(0.5)) {
-    const cx = rng.pick(WORLD.vRoads);
-    const dir = rng.sign();
-    return { x: laneCoord('v', cx, dir), y: rng.float(60, SAND_Y - 60), kind: 'v', centre: cx, dir };
+// Move a circle by (dx,dy), sliding along buildings, water and the world edge.
+// Returns the new position; sets result.hit when a wall stopped an axis.
+export function moveCircle(world, x, y, r, dx, dy) {
+  let nx = x + dx;
+  let ny = y;
+  let hit = false;
+  if (circleBlocked(world, nx, ny, r)) {
+    hit = true;
+    nx = x;
   }
-  const cy = rng.pick(WORLD.hRoads);
-  const dir = rng.sign();
-  return { x: rng.float(60, WORLD.w - 60), y: laneCoord('h', cy, dir), kind: 'h', centre: cy, dir };
+  ny = y + dy;
+  if (circleBlocked(world, nx, ny, r)) {
+    hit = true;
+    ny = y;
+  }
+  return { x: nx, y: ny, hit };
+}
+
+export function circleBlocked(world, x, y, r) {
+  if (x < r || y < r || x > WORLD_W - r || y > WORLD_H - r) return true;
+  if (x + r >= WATER_X) return true; // nobody drives or walks into the sea
+  return buildingAt(world, x, y, r - 2) !== null;
+}
+
+// Nearest point on the road network to (x,y): snap to the closer grid axis.
+export function nearestRoadPoint(x, y) {
+  let bestAx = AVENUES[0];
+  for (const ax of AVENUES) if (Math.abs(ax - x) < Math.abs(bestAx - x)) bestAx = ax;
+  let bestSy = STREETS[0];
+  for (const sy of STREETS) if (Math.abs(sy - y) < Math.abs(bestSy - y)) bestSy = sy;
+  if (Math.abs(bestAx - x) < Math.abs(bestSy - y)) return { x: bestAx, y };
+  return { x, y: bestSy };
+}
+
+// A random road point at roughly `dist` from (x,y), for spawning traffic/police.
+export function roadPointNear(rng, x, y, dist) {
+  for (let tries = 0; tries < 12; tries++) {
+    const onAvenue = rng.chance(0.5);
+    if (onAvenue) {
+      const ax = rng.pick(AVENUES);
+      const yy = clamp(y + rng.range(-dist, dist), 80, WORLD_H - 80);
+      if (Math.hypot(ax - x, yy - y) > dist * 0.55) return { x: ax, y: yy };
+    } else {
+      const sy = rng.pick(STREETS);
+      const xx = clamp(x + rng.range(-dist, dist), 80, BEACH_X - 60);
+      if (Math.hypot(xx - x, sy - y) > dist * 0.55) return { x: xx, y: sy };
+    }
+  }
+  return { x: AVENUES[2], y: STREETS[2] };
+}
+
+// Sidewalk walking: peds pace the perimeter of a block, inset from its edge.
+export function blockPerimeterPoint(block, t) {
+  const inset = 16;
+  const x0 = block.rect.x0 + inset;
+  const y0 = block.rect.y0 + inset;
+  const x1 = block.rect.x1 - inset;
+  const y1 = block.rect.y1 - inset;
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const per = 2 * (w + h);
+  let d = ((t % per) + per) % per;
+  if (d < w) return { x: x0 + d, y: y0 };
+  d -= w;
+  if (d < h) return { x: x1, y: y0 + d };
+  d -= h;
+  if (d < w) return { x: x1 - d, y: y1 };
+  d -= w;
+  return { x: x0, y: y1 - d };
+}
+
+export function blockPerimeterLength(block) {
+  const w = block.rect.x1 - block.rect.x0 - 32;
+  const h = block.rect.y1 - block.rect.y0 - 32;
+  return 2 * (w + h);
+}
+
+export function clamp(v, min, max) {
+  return v < min ? min : v > max ? max : v;
+}
+
+export function dist(x0, y0, x1, y1) {
+  return Math.hypot(x1 - x0, y1 - y0);
 }
 
 export { PALETTE };

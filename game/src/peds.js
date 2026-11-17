@@ -1,159 +1,239 @@
-// Palm City Heat — pedestrians.
-// One job: the people of Palm City — wandering the sidewalks, fleeing
-// danger, and (too often) meeting traffic.
+// peds.js — the people of Palm City: residents who pace the sidewalks block
+// by block, cross at corners, and run when the city turns dangerous.
+// One job: pedestrian entities — spawning, walking, fleeing, falling.
 
-import { PED, WORLD } from './config.js';
-import { clamp, dist2 } from './random.js';
-import { collideCircle, randomWalkPoint, SAND_Y } from './world.js';
+import { blockPerimeterPoint, blockPerimeterLength, moveCircle, clamp } from './world.js';
 
-const SHIRTS = ['#ff6b6b', '#feca57', '#48dbfb', '#1dd1a1', '#f368e0', '#ff9f43', '#c8d6e5', '#54a0ff', '#5f27cd', '#ff9ff3'];
+const SHIRTS = ['#e86a5a', '#5a8ae8', '#f2d13d', '#7fe08a', '#e8e4da', '#b07fe0', '#3fb8ae', '#f28ab0'];
+const SKIN = ['#f2c9a0', '#d9a06b', '#a06a3b', '#7a4a26', '#ffe0bd'];
 
-export function createPed(state, x, y, opts = {}) {
-  const p = {
-    id: state.nextId++,
-    x, y,
-    angle: state.rng.float(0, Math.PI * 2),
-    hp: PED.hp,
-    color: opts.color || state.rng.pick(SHIRTS),
-    mode: opts.mode || 'wander', // 'wander' | 'flee' | 'down' | 'dead'
-    tx: x, ty: y,
-    panic: opts.panic || 0,
-    downFor: 0,
-    deadFor: 0,
-    retarget: state.rng.int(0, 240),
+export function blockAt(world, col, row) {
+  if (col < 0 || col > 5 || row < 0 || row > 3) return null;
+  return world.blocks[col * 4 + row];
+}
+
+// The perimeter parameter t closest to a point beside this block.
+export function nearestPerimeterT(block, x, y) {
+  const inset = 16;
+  const x0 = block.rect.x0 + inset;
+  const y0 = block.rect.y0 + inset;
+  const x1 = block.rect.x1 - inset;
+  const y1 = block.rect.y1 - inset;
+  const w = x1 - x0;
+  const h = y1 - y0;
+  const edges = [
+    { d: Math.abs(y - y0), t: clamp(x - x0, 0, w) },
+    { d: Math.abs(x - x1), t: w + clamp(y - y0, 0, h) },
+    { d: Math.abs(y - y1), t: w + h + clamp(x1 - x, 0, w) },
+    { d: Math.abs(x - x0), t: 2 * w + h + clamp(y1 - y, 0, h) },
+  ];
+  edges.sort((a, b) => a.d - b.d);
+  return edges[0].t;
+}
+
+export function nearestBlock(world, x, y) {
+  let best = null;
+  let bestD = Infinity;
+  for (const b of world.blocks) {
+    const cx = clamp(x, b.rect.x0, b.rect.x1);
+    const cy = clamp(y, b.rect.y0, b.rect.y1);
+    const d = Math.hypot(x - cx, y - cy);
+    if (d < bestD) {
+      bestD = d;
+      best = b;
+    }
+  }
+  return best;
+}
+
+export function spawnPed(game, x, y, opts = {}) {
+  const rng = game.rng;
+  const block = nearestBlock(game.world, x, y);
+  const ped = {
+    x,
+    y,
+    block,
+    t: block ? nearestPerimeterT(block, x, y) : 0,
+    dir: rng.sign(),
+    speed: rng.range(38, 62),
+    state: opts.state || 'walk', // walk | cross | flee | down
+    hp: 30,
+    dead: false,
+    downTimer: 0,
+    fleeTimer: 0,
+    fleeX: 0,
+    fleeY: 0,
+    crossX: 0,
+    crossY: 0,
+    crossBlock: null,
+    shirt: rng.pick(SHIRTS),
+    skin: rng.pick(SKIN),
+    phase: rng.range(0, Math.PI * 2),
+    panic: 0,
   };
-  state.peds.push(p);
-  return p;
+  game.peds.push(ped);
+  return ped;
 }
 
-export function spawnPeds(state) {
-  while (state.peds.filter((p) => p.mode !== 'dead').length < PED.count) {
-    const x = state.rng.float(80, WORLD.w - 80);
-    const y = state.rng.float(80, SAND_Y - 60);
-    const pt = randomWalkPoint(state.rng, x, y, 60);
-    createPed(state, pt.x, pt.y);
-  }
-}
-
-// A driver bailing out of a car the player just took, or a wreck: they run.
-export function spawnFleeingDriver(state, vehicle) {
-  const p = createPed(state, vehicle.x + 14, vehicle.y + 10, { mode: 'flee', panic: 200 });
-  p.tx = vehicle.x - 300;
-  p.ty = vehicle.y - 200;
-  return p;
-}
-
-function movePed(state, p, vx, vy) {
-  const res = collideCircle(state.city, p.x + vx, p.y + vy, PED.radius);
-  p.x = res.x;
-  p.y = res.y;
-}
-
-export function stepPed(state, p) {
-  const player = state.player;
-  if (p.mode === 'dead') { p.deadFor++; return; }
-  if (p.mode === 'down') {
-    p.downFor++;
-    if (p.downFor > 260 && p.hp > 0) { p.mode = 'flee'; p.panic = 160; }
-    return;
-  }
-
-  // Panic: gunfire, crimes and near-miss cars set state.threat.
-  const threat = state.threat;
-  if (threat && state.tick - threat.t < 200 && dist2(p.x, p.y, threat.x, threat.y) < 280 * 280) {
-    p.mode = 'flee';
-    p.panic = Math.max(p.panic, 90);
-    p.tx = threat.x;
-    p.ty = threat.y;
-  }
-  // A car bearing down on them is its own reason to run.
-  for (const v of state.vehicles) {
-    if (v.dead || v.wrecked) continue;
-    if (Math.abs(v.speed) > 2.4 && dist2(p.x, p.y, v.x, v.y) < 90 * 90) {
-      p.mode = 'flee';
-      p.panic = Math.max(p.panic, 50);
-      p.tx = v.x;
-      p.ty = v.y;
+// A threat at (x,y): nearby peds run from it.
+export function scarePeds(game, x, y, radius) {
+  for (const ped of game.peds) {
+    if (ped.dead || ped.state === 'down') continue;
+    if (Math.hypot(ped.x - x, ped.y - y) < radius) {
+      ped.state = 'flee';
+      ped.fleeTimer = game.rng.range(1.6, 3.2);
+      ped.fleeX = x;
+      ped.fleeY = y;
+      ped.panic = 1;
     }
   }
+}
 
-  let speed = PED.walk;
-  let dx = 0;
-  let dy = 0;
-  if (p.mode === 'flee') {
-    speed = PED.flee;
-    dx = p.x - p.tx;
-    dy = p.y - p.ty;
-    const d = Math.hypot(dx, dy) || 1;
-    dx /= d; dy /= d;
-    p.panic--;
-    if (p.panic <= 0) { p.mode = 'wander'; p.retarget = 0; }
+function startCrossing(game, ped) {
+  const block = ped.block;
+  if (!block) return;
+  const per = blockPerimeterLength(block);
+  const w = block.rect.x1 - block.rect.x0 - 32;
+  const h = block.rect.y1 - block.rect.y0 - 32;
+  const t = ((ped.t % per) + per) % per;
+  let target = null;
+  let nextBlock = null;
+  if (t < w) {
+    nextBlock = blockAt(game.world, block.col, block.row - 1); // north edge → block above
+  } else if (t < w + h) {
+    nextBlock = blockAt(game.world, block.col + 1, block.row); // east edge
+  } else if (t < 2 * w + h) {
+    nextBlock = blockAt(game.world, block.col, block.row + 1); // south edge
   } else {
-    if (--p.retarget <= 0 || dist2(p.x, p.y, p.tx, p.ty) < 18 * 18) {
-      const t = randomWalkPoint(state.rng, p.x, p.y);
-      p.tx = t.x;
-      p.ty = t.y;
-      p.retarget = state.rng.int(300, 900);
-    }
-    dx = p.tx - p.x;
-    dy = p.ty - p.y;
-    const d = Math.hypot(dx, dy);
-    if (d > 1) { dx /= d; dy /= d; } else { dx = 0; dy = 0; }
+    nextBlock = blockAt(game.world, block.col - 1, block.row); // west edge
   }
-  if (dx || dy) p.angle = Math.atan2(dy, dx);
-  movePed(state, p, dx * speed, dy * speed);
+  if (!nextBlock) return;
+  // Aim for the far sidewalk of the neighbouring block at the same lateral spot.
+  const inset = 16;
+  if (nextBlock.col === block.col && nextBlock.row === block.row - 1) {
+    target = { x: ped.x, y: nextBlock.rect.y1 - inset };
+  } else if (nextBlock.col === block.col && nextBlock.row === block.row + 1) {
+    target = { x: ped.x, y: nextBlock.rect.y0 + inset };
+  } else if (nextBlock.row === block.row && nextBlock.col === block.col + 1) {
+    target = { x: nextBlock.rect.x0 + inset, y: ped.y };
+  } else {
+    target = { x: nextBlock.rect.x1 - inset, y: ped.y };
+  }
+  ped.state = 'cross';
+  ped.crossX = target.x;
+  ped.crossY = target.y;
+  ped.crossBlock = nextBlock;
+}
 
-  // Traffic accidents: any fast car can knock a pedestrian down.
-  for (const v of state.vehicles) {
-    if (v.dead || v.wrecked) continue;
-    if (Math.abs(v.speed) < 1.2) continue;
-    if (dist2(p.x, p.y, v.x, v.y) < 26 * 26) {
-      const byPlayer = state.player.inCar === v.id;
-      hurtPed(state, p, Math.abs(v.speed) * 9, v.x, v.y);
-      if (byPlayer) {
-        state.reportCrime('hitPed', p.x, p.y);
-        state.audio.hit();
-      }
-      break;
+export function updatePeds(game, dt) {
+  const rng = game.rng;
+  const player = game.player;
+  for (const ped of game.peds) {
+    if (ped.dead) continue;
+    if (ped.state === 'down') {
+      ped.downTimer -= dt;
+      if (ped.downTimer <= 0 && ped.hp > 0) ped.state = 'flee';
+      continue;
     }
+    // Danger sense: fast cars and fresh gunfire send people running.
+    if (ped.state !== 'flee') {
+      let threat = null;
+      for (const car of game.cars) {
+        if (car.dead) continue;
+        if (Math.abs(car.speed) > 190 && Math.hypot(car.x - ped.x, car.y - ped.y) < 95) {
+          threat = car;
+          break;
+        }
+      }
+      if (!threat && game.lastShotAt && game.time - game.lastShotAt < 0.4) {
+        if (Math.hypot(game.lastShotX - ped.x, game.lastShotY - ped.y) < 240) {
+          threat = { x: game.lastShotX, y: game.lastShotY };
+        }
+      }
+      if (threat) {
+        ped.state = 'flee';
+        ped.fleeTimer = rng.range(1.4, 2.6);
+        ped.fleeX = threat.x;
+        ped.fleeY = threat.y;
+      }
+    }
+
+    if (ped.state === 'flee') {
+      ped.fleeTimer -= dt;
+      const dx = ped.x - ped.fleeX;
+      const dy = ped.y - ped.fleeY;
+      const d = Math.hypot(dx, dy) || 1;
+      const run = 148;
+      const moved = moveCircle(game.world, ped.x, ped.y, 9, (dx / d) * run * dt, (dy / d) * run * dt);
+      ped.x = moved.x;
+      ped.y = moved.y;
+      ped.phase += dt * 11;
+      if (ped.fleeTimer <= 0) {
+        ped.state = 'walk';
+        ped.block = nearestBlock(game.world, ped.x, ped.y);
+        if (ped.block) ped.t = nearestPerimeterT(ped.block, ped.x, ped.y);
+      }
+      continue;
+    }
+
+    if (ped.state === 'cross') {
+      const dx = ped.crossX - ped.x;
+      const dy = ped.crossY - ped.y;
+      const d = Math.hypot(dx, dy);
+      if (d < 6) {
+        ped.block = ped.crossBlock;
+        ped.t = nearestPerimeterT(ped.block, ped.x, ped.y);
+        ped.state = 'walk';
+      } else {
+        ped.x += (dx / d) * ped.speed * 1.25 * dt;
+        ped.y += (dy / d) * ped.speed * 1.25 * dt;
+        ped.phase += dt * 8;
+      }
+      continue;
+    }
+
+    // walk: pace the block perimeter; sometimes cross at a corner.
+    if (!ped.block) {
+      ped.block = nearestBlock(game.world, ped.x, ped.y);
+      if (!ped.block) continue;
+      ped.t = nearestPerimeterT(ped.block, ped.x, ped.y);
+    }
+    ped.t += ped.dir * ped.speed * dt;
+    const pos = blockPerimeterPoint(ped.block, ped.t);
+    ped.x = pos.x;
+    ped.y = pos.y;
+    ped.phase += dt * 6;
+    if (rng.chance(0.0016)) ped.dir *= -1;
+    if (rng.chance(0.0011)) startCrossing(game, ped);
   }
   void player;
 }
 
-export function hurtPed(state, p, damage, fromX, fromY) {
-  if (p.mode === 'dead') return;
-  p.hp -= damage;
-  state.spawnParticles(p.x, p.y, 5, '#e74c3c');
-  if (p.hp <= 0) {
-    p.mode = 'dead';
-    p.deadFor = 0;
-    // What falls out of pockets: a little cash, sometimes more.
-    if (state.rng.chance(0.75)) {
-      state.pickups.push({ id: state.nextId++, kind: 'cash', x: p.x + state.rng.float(-14, 14), y: p.y + state.rng.float(-14, 14), amount: state.rng.int(5, 40), t: 0 });
+// Hurt a pedestrian. Returns true if this blow finished them.
+export function damagePed(game, ped, amount, cause) {
+  if (ped.dead) return false;
+  ped.hp -= amount;
+  if (ped.hp <= 0) {
+    ped.dead = true;
+    ped.state = 'down';
+    game.spawnParticles(ped.x, ped.y, 8, '#c93b2e', 60);
+    if (cause === 'car' || cause === 'shot' || cause === 'melee') {
+      if (game.rng.chance(0.55)) {
+        game.pickups.push({ x: ped.x, y: ped.y, kind: 'cash', amount: game.rng.int(10, 45), bob: 0 });
+      }
     }
-  } else {
-    p.mode = 'down';
-    p.downFor = 0;
-    const d = Math.hypot(p.x - fromX, p.y - fromY) || 1;
-    movePed(state, p, ((p.x - fromX) / d) * 16, ((p.y - fromY) / d) * 16);
+    return true;
   }
+  ped.state = 'flee';
+  ped.fleeTimer = 2.2;
+  ped.fleeX = game.player.x;
+  ped.fleeY = game.player.y;
+  return false;
 }
 
-export function maintainPeds(state) {
-  if (state.tick % 90 !== 0) return;
-  const alive = state.peds.filter((p) => p.mode !== 'dead' || p.deadFor < 1200);
-  state.peds = alive;
-  const active = alive.filter((p) => p.mode !== 'dead').length;
-  if (active < PED.count) {
-    // New arrivals stroll in from the map edge of the nearest sidewalk, far away.
-    for (let tries = 0; tries < 6; tries++) {
-      const x = state.rng.float(80, WORLD.w - 80);
-      const y = state.rng.float(80, SAND_Y - 60);
-      if (dist2(x, y, state.player.x, state.player.y) < 700 * 700) continue;
-      const pt = randomWalkPoint(state.rng, x, y, 60);
-      createPed(state, pt.x, pt.y);
-      break;
-    }
-  }
-  void clamp;
+export function knockDownPed(game, ped) {
+  if (ped.dead) return;
+  ped.state = 'down';
+  ped.downTimer = 2.6;
+  ped.hp = Math.min(ped.hp, 12);
 }

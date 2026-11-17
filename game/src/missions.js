@@ -1,272 +1,297 @@
-// Palm City Heat — the story.
-// One job: Vivian "Vivi" Solano's four jobs (and the courier work after),
-// their dialogue, markers, timers, payouts and fail states. Everything the
-// HUD calls "the objective" is decided here.
+// missions.js — the story of Palm City Heat: Kai Mercer, a broke courier at
+// the Sunset Palms Motel, takes jobs from fixer Solana "Sol" Reyes to climb
+// out of debt. Four story missions, then endless odd jobs.
+// One job: mission definitions, the active-mission state machine, stage
+// timers, dialogue, payouts and fail states.
 
-import { HEAT } from './config.js';
-import { dist2 } from './random.js';
+import { poiById, dist } from './world.js';
+import { makeCar } from './vehicles.js';
+import { setHeat } from './police.js';
 
-const CONTACT = 'contact';
+export const CONTACT = 'Sol Reyes';
 
-function loc(state, id) {
-  return state.city.locations[id];
-}
-
+// Story missions. startPoi: where the job is picked up. Stages run in order;
+// a stage completes when the player reaches (x,y) within r — deliverCar also
+// requires arriving in the mission car. timeLimit counts down per stage.
 export const STORY = [
   {
-    id: 'm1',
-    title: 'Hot Package',
-    pay: 450,
+    id: 'first-run',
+    title: 'First Run',
+    startPoi: 'cafe',
+    payout: 450,
     intro: [
-      ['Vivi', 'You must be the new wheel in Palm City. I am Vivi. I move things that do not like paperwork.'],
-      ['Vivi', 'Simple first job: a package is waiting at the Marina Warehouse. Bring it to my friend at the Seabreeze Diner.'],
-      ['Vivi', 'And chico — the clock is part of the deal. Do not keep the diner waiting.'],
+      'Sol: Kai. You owe the motel, you owe me, and your van is a lawn ornament.',
+      'Sol: Simple job. Mercado Sol has a package for me — pick it up, take it to Harbor Tower.',
+      'Sol: The clock starts when the package is in your hands. Move.',
     ],
-    phases: [
-      { kind: 'goto', at: 'warehouse', label: 'Pick up the package at the Marina Warehouse', time: 150 },
-      { kind: 'goto', at: 'diner', label: 'Deliver the package to the Seabreeze Diner', time: 120 },
+    stages: [
+      { kind: 'pickup', poi: 'market', r: 44, label: 'Pick up the package at Mercado Sol' },
+      { kind: 'goto', poi: 'office', r: 48, label: 'Deliver to Harbor Tower', timeLimit: 150 },
     ],
-    outro: 'Vivi texts: "Clean work. The city is already talking about you."',
+    outro: 'Sol: Clean and quick. There may be hope for you yet.',
   },
   {
-    id: 'm2',
-    title: 'Golden Hour Getaway',
-    pay: 800,
+    id: 'golden-coupe',
+    title: 'The Golden Coupe',
+    startPoi: 'cafe',
+    payout: 800,
     intro: [
-      ['Vivi', 'A gold coupe is parked at the Aurelia Hotel valet, and its owner owes me more than money.'],
-      ['Vivi', 'Take it. Drive it to Sal\'s Chop Shop in the suburbs. Sal pays cash, no questions.'],
-      ['Vivi', 'Try not to fold it in half on the way. Sal pays less for origami.'],
+      'Sol: A guest at Hotel Brisa skipped out on a very large tab.',
+      'Sol: His golden coupe sits in the hotel lot. Take it to Tito at Andrade Auto.',
+      'Sol: Tito pays for the car, not for a story. Bring it in one piece.',
     ],
-    phases: [
-      { kind: 'steal', at: 'aurelia', label: 'Steal the gold coupe at the Aurelia Hotel' },
-      { kind: 'deliverCar', at: 'chopshop', label: 'Deliver the coupe to Sal\'s Chop Shop' },
+    stages: [
+      { kind: 'goto', poi: 'hotel', r: 60, label: 'Go to the Hotel Brisa parking lot' },
+      { kind: 'deliverCar', poi: 'garage', r: 58, label: 'Deliver the golden coupe to Andrade Auto' },
     ],
-    outro: 'Sal counts out the cash himself. "Vivi\'s new driver," he says. "Huh."',
+    outro: 'Tito: Ha! She still shines. Sol said you were a driver — she undersold it.',
   },
   {
-    id: 'm3',
-    title: 'Heat Wave',
-    pay: 1100,
+    id: 'hot-stash',
+    title: 'Hot Stash',
+    startPoi: 'cafe',
+    payout: 1100,
     intro: [
-      ['Vivi', 'Club Del Mar holds a stash for me. The pickup is easy. What follows is not.'],
-      ['Vivi', 'The club has silent alarms and loud friends. When it goes off, every cop in Palm City will want your autograph.'],
-      ['Vivi', 'Lose them, then lie low at the Palm Court Safehouse by the park. Survive it, and we are partners.'],
+      'Sol: Change of plans. A stash under the park pavilion needs to move. Now.',
+      'Sol: The second you touch it, every badge in Palm City will smell it.',
+      'Sol: Lose them and get to the Sunset Palms Motel. Do not get caught holding it.',
     ],
-    phases: [
-      { kind: 'goto', at: 'beachclub', label: 'Pick up the stash at Club Del Mar', alarm: true },
-      { kind: 'escape', at: 'safehouse', label: 'Lose the heat, then reach the Palm Court Safehouse' },
+    stages: [
+      { kind: 'goto', poi: 'pavilion', r: 40, label: 'Grab the stash at the pavilion', armHeat: 75 },
+      { kind: 'escape', poi: 'motel', r: 58, label: 'Reach the Sunset Palms Motel safehouse' },
     ],
-    outro: 'You made it. Vivi pours two drinks over the phone: "Partners, then."',
+    outro: 'Sol: You walked out of a three-star welcome party. I am officially impressed.',
   },
   {
-    id: 'm4',
-    title: 'Palm City Run',
-    pay: 1600,
+    id: 'palm-city-run',
+    title: 'The Palm City Run',
+    startPoi: 'cafe',
+    payout: 1600,
     intro: [
-      ['Vivi', 'Last job, partner. Three drops, one tank of daylight: Sunset Arms, Palm City General, then the Marina Warehouse.'],
-      ['Vivi', 'Every fixer in the county is watching this run. Make us legends or make us bail money.'],
+      'Sol: Last one, and it is a big one. Three drops, one evening, whole city.',
+      'Sol: Coral Tower, Hotel Brisa, the Maple Street house — then home to the motel.',
+      'Sol: Finish this and your debt is a story you tell, not a number you owe.',
     ],
-    phases: [
-      { kind: 'goto', at: 'gunshop', label: 'Drop 1 of 3: Sunset Arms', time: 240 },
-      { kind: 'goto', at: 'hospital', label: 'Drop 2 of 3: Palm City General' },
-      { kind: 'goto', at: 'warehouse', label: 'Drop 3 of 3: Marina Warehouse' },
+    stages: [
+      { kind: 'goto', poi: 'tower', r: 48, label: 'Drop 1: Coral Tower', timeLimit: 110 },
+      { kind: 'goto', poi: 'hotel', r: 54, label: 'Drop 2: Hotel Brisa', timeLimit: 130 },
+      { kind: 'goto', poi: 'house', r: 48, label: 'Drop 3: Maple Street House', timeLimit: 130 },
+      { kind: 'goto', poi: 'motel', r: 54, label: 'Finish at the Sunset Palms Motel', timeLimit: 120 },
     ],
-    outro: 'Three drops, no dents in the legend. Palm City is yours now — Vivi splits everything 60/40. Her favour.',
+    outro: 'Sol: Debt cleared, courier. Palm City is yours now — the jobs keep coming if you want them.',
   },
 ];
 
-export function newMissionState() {
+export function createMissionState() {
   return {
     storyIndex: 0, // next story mission to offer
-    active: null, // { def, phaseIndex, timer, carId }
-    dialogue: null, // { speaker lines, i, then: 'activate' }
-    done: false, // story finished
+    active: null, // { def, stageIndex, timeLeft, car }
+    dialogue: [], // queued lines [{who, text}]
+    dialogueTimer: 0,
+    banner: '',
+    bannerTimer: 0,
+    jobsDone: 0,
+    storyDone: false,
+    job: null, // current repeatable odd job definition, when offered
   };
 }
 
-function banner(state, text, sub = '') {
-  state.banner = { text, sub, t: state.tick };
+function stagePoint(game, stage) {
+  const poi = poiById(game.world, stage.poi);
+  return { x: poi.x, y: poi.y };
 }
 
-function startDialogue(state, def) {
-  state.mission.dialogue = { lines: def.intro, i: 0, def };
-  state.audio.dialogue();
+export function availableMission(game) {
+  const ms = game.missions;
+  if (ms.active) return null;
+  if (ms.storyIndex < STORY.length) return STORY[ms.storyIndex];
+  return ms.job;
 }
 
-export function currentTarget(state) {
-  const m = state.mission;
-  if (m.dialogue) return null;
-  if (!m.active) {
-    // Between jobs the marker always leads back to Vivi (story or courier work).
-    const c = loc(state, CONTACT);
-    return c ? { x: c.x, y: c.y, label: 'Vivi — Marlin Hotel' } : null;
+export function availablePoint(game) {
+  const def = availableMission(game);
+  if (!def) return null;
+  const poi = poiById(game.world, def.startPoi);
+  return { x: poi.x, y: poi.y, def };
+}
+
+export function currentObjective(game) {
+  const ms = game.missions;
+  if (ms.active) {
+    const stage = ms.active.def.stages[ms.active.stageIndex];
+    const pt = stagePoint(game, stage);
+    const d = Math.round(dist(game.player.x, game.player.y, pt.x, pt.y) / 10);
+    let text = stage.label + '  ·  ' + d + 'm';
+    if (ms.active.timeLeft !== null) text += '  ·  ' + Math.ceil(ms.active.timeLeft) + 's';
+    return text;
   }
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  const at = loc(state, phase.at);
-  return at ? { x: at.x, y: at.y, label: phase.label } : null;
+  const avail = availablePoint(game);
+  if (avail) {
+    const d = Math.round(dist(game.player.x, game.player.y, avail.x, avail.y) / 10);
+    return 'New job: ' + avail.def.title + '  ·  ' + d + 'm';
+  }
+  return 'Free roam — Palm City is yours';
 }
 
-export function objectiveText(state) {
-  const m = state.mission;
-  if (m.dialogue) return 'Talking to Vivi…';
-  if (!m.active) {
-    if (m.storyIndex < STORY.length) return `Meet Vivi at the Marlin Hotel — "${STORY[m.storyIndex].title}"`;
-    return 'Free roam — see Vivi at the Marlin Hotel for courier work';
+export function currentMarker(game) {
+  const ms = game.missions;
+  if (ms.active) {
+    const stage = ms.active.def.stages[ms.active.stageIndex];
+    if (stage.kind === 'deliverCar' && ms.active.car && !game.player.inCar) {
+      return { x: ms.active.car.x, y: ms.active.car.y, color: '#e8b93b' };
+    }
+    const pt = stagePoint(game, stage);
+    return { x: pt.x, y: pt.y, color: '#ffb347' };
   }
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  let text = phase.label;
-  if (m.active.timer != null) {
-    const s = Math.max(0, Math.ceil(m.active.timer / 60));
-    text += ` — ${Math.floor(s / 60)}:${String(s % 60).padStart(2, '0')}`;
-  }
-  return text;
+  const avail = availablePoint(game);
+  if (avail) return { x: avail.x, y: avail.y, color: '#7fe08a' };
+  return null;
 }
 
-// Pressing E near Vivi starts (or retries) the next job.
-export function tryInteract(state) {
-  const m = state.mission;
-  if (m.active || m.dialogue) return false;
-  const c = loc(state, CONTACT);
-  if (!c) return false;
-  if (dist2(state.player.x, state.player.y, c.x, c.y) > 70 * 70) return false;
-  if (state.player.inCar) return false;
-  if (m.storyIndex < STORY.length) {
-    startDialogue(state, STORY[m.storyIndex]);
-  } else {
-    startDialogue(state, courierDef(state));
+function queueDialogue(ms, lines) {
+  for (const line of lines) {
+    const split = line.indexOf(':');
+    ms.dialogue.push({ who: line.slice(0, split), text: line.slice(split + 1).trim() });
   }
-  return true;
+  ms.dialogueTimer = 0;
 }
 
-function courierDef(state) {
-  const ids = ['warehouse', 'diner', 'aurelia', 'chopshop', 'gunshop', 'hospital', 'beachclub'];
-  const at = state.rng.pick(ids);
-  const target = loc(state, at);
-  const c = loc(state, CONTACT);
-  const d = Math.hypot(target.x - c.x, target.y - c.y);
+export function startMission(game, def) {
+  const ms = game.missions;
+  ms.active = { def, stageIndex: 0, timeLeft: null, car: null };
+  queueDialogue(ms, def.intro);
+  setStage(game, 0);
+  game.audio.pickup();
+}
+
+function setStage(game, idx) {
+  const ms = game.missions;
+  const stage = ms.active.def.stages[idx];
+  ms.active.stageIndex = idx;
+  ms.active.timeLeft = stage.timeLimit || null;
+  // The golden coupe appears in the Hotel Brisa lot when its mission starts.
+  if (ms.active.def.id === 'golden-coupe' && idx === 0 && !ms.active.car) {
+    const car = makeCar(game.rng, 3961, 1401, 'mission', 'sport');
+    car.color = '#e8b93b';
+    car.angle = Math.PI / 2;
+    car.driver = false;
+    ms.active.car = car;
+    game.cars.push(car);
+  }
+}
+
+export function completeMission(game) {
+  const ms = game.missions;
+  const def = ms.active.def;
+  game.player.cash += def.payout;
+  ms.jobsDone += 1;
+  queueDialogue(ms, [def.outro]);
+  ms.banner = def.title + ' complete  ·  +$' + def.payout;
+  ms.bannerTimer = 4;
+  game.audio.missionGood();
+  game.addFloater(game.player.x, game.player.y - 24, '+$' + def.payout, '#7fe08a');
+  ms.active = null;
+  if (def.id === STORY[STORY.length - 1].id) ms.storyDone = true;
+  if (STORY.includes(def)) ms.storyIndex += 1;
+  if (def.id === 'odd-job') ms.job = makeOddJob(game);
+  if (ms.storyIndex >= STORY.length && !ms.job) ms.job = makeOddJob(game);
+  game.saveGame();
+}
+
+export function failMission(game, reason) {
+  const ms = game.missions;
+  if (!ms.active) return;
+  ms.banner = ms.active.def.title + ' failed — ' + reason;
+  ms.bannerTimer = 4;
+  game.audio.missionBad();
+  if (ms.active.car && ms.active.car.kind === 'mission') {
+    ms.active.car.kind = 'parked'; // the coupe stays in the world as a normal car
+  }
+  ms.active = null;
+}
+
+// Repeatable work once the story is done (and it refreshes after each job).
+export function makeOddJob(game) {
+  const rng = game.rng;
+  const places = ['market', 'office', 'hotel', 'tower', 'house', 'garage', 'cafe', 'pavilion'];
+  const from = rng.pick(places);
+  let to = rng.pick(places);
+  if (to === from) to = 'motel';
+  const a = poiById(game.world, from);
+  const b = poiById(game.world, to);
+  const d = dist(a.x, a.y, b.x, b.y);
   return {
-    id: 'courier',
-    title: 'Courier Run',
-    pay: 140 + Math.round(d / 12),
-    intro: [['Vivi', `Quick one, partner: a parcel for ${target.name}. The meter is running.`]],
-    phases: [{ kind: 'goto', at, label: `Deliver to ${target.name}`, time: Math.ceil(d / 55) + 45 }],
-    outro: 'Vivi texts: "Pleasure doing business."',
+    id: 'odd-job',
+    title: 'Odd Job',
+    startPoi: from,
+    payout: Math.round(120 + d / 6),
+    intro: ['Sol: Quick run, no questions. Pick up at ' + a.name + ', drop at ' + b.name + '.'],
+    stages: [
+      { kind: 'pickup', poi: from, r: 46, label: 'Pick up at ' + a.name },
+      { kind: 'goto', poi: to, r: 52, label: 'Drop at ' + b.name, timeLimit: Math.round(60 + d / 22) },
+    ],
+    outro: 'Sol: Paid. Another one is on the board when you want it.',
   };
 }
 
-function activateMission(state, def) {
-  const m = state.mission;
-  m.active = { def, phaseIndex: 0, timer: null, carId: null };
-  applyPhase(state);
-  banner(state, def.title, def.phases[0].label);
-  state.audio.mission();
-}
-
-function applyPhase(state) {
-  const m = state.mission;
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  m.active.timer = phase.time ? phase.time * 60 : null;
-  if (phase.kind === 'steal') {
-    // The gold coupe appears at the Aurelia valet stand, keys in, engine warm.
-    const at = loc(state, 'aurelia');
-    const car = state.spawnSpecialCar(at.x + 30, at.y + 26);
-    m.active.carId = car.id;
+export function updateMissions(game, dt) {
+  const ms = game.missions;
+  if (ms.bannerTimer > 0) ms.bannerTimer -= dt;
+  if (ms.dialogue.length > 0) {
+    ms.dialogueTimer += dt;
+    if (ms.dialogueTimer > 4.2) {
+      ms.dialogue.shift();
+      ms.dialogueTimer = 0;
+    }
   }
-  if (phase.alarm) {
-    state.heat += HEAT.missionAlarm;
-    state.lastCrimeAt = state.tick;
-    banner(state, 'The alarm trips!', 'Every cop in Palm City just heard that.');
-    state.audio.bust();
-  }
-}
-
-function completeMission(state) {
-  const m = state.mission;
-  const def = m.active.def;
-  state.player.cash += def.pay;
-  state.addFloater(state.player.x, state.player.y - 30, `+$${def.pay}`, '#ffd23f');
-  banner(state, `${def.title} — complete`, def.outro);
-  state.audio.cash();
-  state.audio.mission();
-  m.active = null;
-  if (def.id !== 'courier') {
-    m.storyIndex++;
-    if (m.storyIndex >= STORY.length) m.done = true;
-  }
-}
-
-function failMission(state, why) {
-  const m = state.mission;
-  banner(state, 'Job blown', why);
-  state.audio.wasted();
-  m.active = null;
-}
-
-export function onEnterVehicle(state, vehicle) {
-  const m = state.mission;
-  if (!m.active) return;
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  if (phase.kind === 'steal' && vehicle.id === m.active.carId) {
-    state.reportCrime('carjack', vehicle.x, vehicle.y);
-    advancePhase(state);
-  }
-}
-
-function advancePhase(state) {
-  const m = state.mission;
-  m.active.phaseIndex++;
-  if (m.active.phaseIndex >= m.active.def.phases.length) {
-    completeMission(state);
-    return;
-  }
-  applyPhase(state);
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  banner(state, m.active.def.title, phase.label);
-}
-
-export function updateMissions(state, input) {
-  const m = state.mission;
-
-  // Dialogue: E / click / Enter walks the lines, then the job activates.
-  if (m.dialogue) {
-    if (input.interact || input.confirmPressed || input.attackPressed) {
-      m.dialogue.i++;
-      state.audio.dialogue();
-      if (m.dialogue.i >= m.dialogue.lines.length) {
-        const def = m.dialogue.def;
-        m.dialogue = null;
-        activateMission(state, def);
-      }
+  const p = game.player;
+  if (!ms.active) {
+    // Standing in the green marker starts the offered job.
+    const avail = availablePoint(game);
+    if (avail && dist(p.x, p.y, avail.x, avail.y) < 34 && !p.inCar) {
+      startMission(game, avail.def);
+    } else if (avail && dist(p.x, p.y, avail.x, avail.y) < 40 && p.inCar) {
+      // Driving through also works — jobs should never feel gated.
+      startMission(game, avail.def);
     }
     return;
   }
-  if (!m.active) return;
-
-  const phase = m.active.def.phases[m.active.phaseIndex];
-  if (m.active.timer != null) {
-    m.active.timer--;
-    if (m.active.timer <= 0) {
-      failMission(state, 'Out of time. Vivi hates waiting, and so does the money.');
+  const stage = ms.active.def.stages[ms.active.stageIndex];
+  if (ms.active.timeLeft !== null) {
+    ms.active.timeLeft -= dt;
+    if (ms.active.timeLeft <= 0) {
+      failMission(game, 'out of time');
       return;
     }
   }
-
-  const at = loc(state, phase.at);
-  const near = at && dist2(state.player.x, state.player.y, at.x, at.y) < 78 * 78;
-
-  if (phase.kind === 'goto' && near) {
-    advancePhase(state);
-  } else if (phase.kind === 'deliverCar') {
-    const car = state.vehicles.find((v) => v.id === m.active.carId);
-    if (!car || car.wrecked) {
-      failMission(state, 'The coupe is wrecked. Sal wanted a car, not a confession.');
+  if (stage.kind === 'deliverCar') {
+    const car = ms.active.car;
+    if (!car || car.dead) {
+      failMission(game, 'the coupe was wrecked');
       return;
     }
-    if (near && state.player.inCar === m.active.carId) advancePhase(state);
-  } else if (phase.kind === 'escape') {
-    if (near) {
-      if (state.wanted === 0) advancePhase(state);
-      else if (state.tick % 240 === 0) state.addFloater(at.x, at.y - 24, 'Too hot — lose the cops first!', '#ff5d5d');
+    const pt = stagePoint(game, stage);
+    if (p.inCar === car && dist(p.x, p.y, pt.x, pt.y) < stage.r) {
+      advanceStage(game);
     }
+    return;
+  }
+  const pt = stagePoint(game, stage);
+  if (dist(p.x, p.y, pt.x, pt.y) < stage.r) {
+    advanceStage(game);
+  }
+}
+
+function advanceStage(game) {
+  const ms = game.missions;
+  const doneStage = ms.active.def.stages[ms.active.stageIndex];
+  // Grabbing the stash is the moment the heat arrives.
+  if (doneStage.armHeat) setHeat(game, doneStage.armHeat);
+  const next = ms.active.stageIndex + 1;
+  game.audio.cash();
+  if (next >= ms.active.def.stages.length) {
+    completeMission(game);
+  } else {
+    setStage(game, next);
   }
 }

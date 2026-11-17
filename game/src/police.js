@@ -1,160 +1,180 @@
-// Palm City Heat — the law.
-// One job: heat and wanted stars, witnesses, police spawns, pursuit
-// driving and the bust meter. Palm City PD does not forgive, but it does
-// eventually get bored.
+// police.js — the law: the wanted system (heat, stars, witnesses, decay) and
+// the Palm City PD pursuit drivers who hunt the player, plus the bust meter.
+// One job: crime consequences — being seen, being chased, being caught.
 
-import { COP, HEAT, WORLD } from './config.js';
-import { clamp, dist2, turnToward } from './random.js';
-import { collideCircle, laneCoord } from './world.js';
-import { createVehicle, damageCar } from './vehicles.js';
+import { WANTED, POLICE_BY_STAR, POLICE_SPEED } from './config.js';
+import { roadPointNear, dist } from './world.js';
+import { makeCar, stepCarPhysics, POLICE_MODEL } from './vehicles.js';
 
-// A crime happened at (x, y). It only heats the player up if someone saw it:
-// a pedestrian on their feet or a cop within earshot. Either way, people
-// nearby scatter.
-export function reportCrime(state, kind, x, y) {
-  let witnessed = false;
-  let near = false;
-  for (const p of state.peds) {
-    if (p.mode === 'dead' || p.mode === 'down') continue;
-    const d2 = dist2(x, y, p.x, p.y);
-    if (d2 < HEAT.seenRadius * HEAT.seenRadius) witnessed = true;
-    if (d2 < 200 * 200) near = true;
-  }
-  for (const v of state.vehicles) {
-    if (v.kind === 'cop' && !v.wrecked && dist2(x, y, v.x, v.y) < HEAT.seenRadius * HEAT.seenRadius) witnessed = true;
-  }
-  if (near || witnessed) state.threat = { x, y, t: state.tick };
-  if (!witnessed) return false;
-  state.heat += HEAT[kind] || 10;
-  state.lastCrimeAt = state.tick;
-  return true;
+export function createWanted() {
+  return {
+    heat: 0,
+    stars: 0,
+    unseenFor: 0, // seconds since any witness last saw the player
+    bust: 0, // 0..1, fills while police pin a slow player
+    spawnCooldown: 0,
+  };
 }
 
-export function wantedStars(state) {
-  if (state.heat <= 0) return 0;
-  return Math.min(5, Math.ceil(state.heat / HEAT.perStar));
+export function starsForHeat(heat) {
+  if (heat <= 0) return 0;
+  return Math.min(5, Math.ceil(heat / WANTED.heatPerStar));
 }
 
-function playerIsSeen(state) {
-  const p = state.player;
-  for (const v of state.vehicles) {
-    if (v.kind === 'cop' && !v.wrecked && dist2(p.x, p.y, v.x, v.y) < 470 * 470) return true;
+// Is anyone in a position to see a crime at (x, y)?
+export function witnessedBy(game, x, y) {
+  for (const car of game.cars) {
+    if (car.kind === 'police' && !car.dead && dist(x, y, car.x, car.y) < WANTED.policeSight) return true;
+  }
+  for (const ped of game.peds) {
+    if (!ped.dead && ped.state !== 'down' && dist(x, y, ped.x, ped.y) < WANTED.pedSight) return true;
   }
   return false;
 }
 
-export function stepWanted(state) {
-  state.wanted = wantedStars(state);
-  const seen = playerIsSeen(state);
-  state.playerSeen = seen;
-  if (!seen && state.tick - state.lastCrimeAt > 200) {
-    state.heat = Math.max(0, state.heat - HEAT.decay);
-  }
-  if (state.wanted === 0) state.bust = 0;
+// Report a crime. Adds heat only when witnessed (or when the police are
+// already watching the player). Returns true when it raised the heat.
+export function commitCrime(game, kind, x, y) {
+  const w = game.wanted;
+  const seen = witnessedBy(game, x, y) || (w.stars > 0 && witnessedBy(game, game.player.x, game.player.y));
+  if (!seen) return false;
+  w.heat = Math.min(WANTED.maxHeat, w.heat + (WANTED.crimes[kind] || 10));
+  w.stars = starsForHeat(w.heat);
+  w.unseenFor = 0;
+  return true;
 }
 
-function spawnCop(state) {
-  const rng = state.rng;
-  const p = state.player;
-  for (let tries = 0; tries < 10; tries++) {
-    const vertical = rng.chance(0.5);
-    let x, y, axis, centre, dir;
-    if (vertical) {
-      centre = rng.pick(WORLD.vRoads);
-      dir = rng.sign();
-      x = laneCoord('v', centre, dir);
-      y = clamp(p.y + rng.sign() * rng.float(480, 720), 60, WORLD.h - 200);
-      axis = 'v';
-    } else {
-      centre = rng.pick(WORLD.hRoads);
-      dir = rng.sign();
-      y = laneCoord('h', centre, dir);
-      x = clamp(p.x + rng.sign() * rng.float(480, 720), 60, WORLD.w - 60);
-      axis = 'h';
+export function setHeat(game, heat) {
+  const w = game.wanted;
+  w.heat = Math.max(0, Math.min(WANTED.maxHeat, heat));
+  w.stars = starsForHeat(w.heat);
+  w.unseenFor = 0;
+}
+
+export function clearHeat(game) {
+  game.wanted.heat = 0;
+  game.wanted.stars = 0;
+  game.wanted.bust = 0;
+  game.wanted.unseenFor = 0;
+}
+
+function playerObserved(game) {
+  const p = game.player;
+  for (const car of game.cars) {
+    if (car.kind === 'police' && !car.dead && dist(p.x, p.y, car.x, car.y) < WANTED.policeSight) return true;
+  }
+  for (const ped of game.peds) {
+    if (!ped.dead && ped.state !== 'down' && dist(p.x, p.y, ped.x, ped.y) < 170) return true;
+  }
+  return false;
+}
+
+export function updateWanted(game, dt) {
+  const w = game.wanted;
+  if (playerObserved(game)) {
+    w.unseenFor = 0;
+  } else {
+    w.unseenFor += dt;
+    if (w.unseenFor > WANTED.decayDelay && w.heat > 0) {
+      w.heat = Math.max(0, w.heat - WANTED.decayRate * dt);
+      w.stars = starsForHeat(w.heat);
     }
-    if (dist2(x, y, p.x, p.y) < 420 * 420) continue;
-    const v = createVehicle(state, { x, y, kind: 'cop', driver: 'cop', axis, centre, dir, model: 1 });
-    v.speed = 3;
-    return v;
   }
-  return null;
-}
-
-export function maintainPolice(state) {
-  const cops = state.vehicles.filter((v) => v.kind === 'cop' && v.driver === 'cop' && !v.wrecked);
-  const desired = state.wanted === 0 ? 0 : Math.min(COP.maxUnits, state.wanted + 1);
-  if (state.wanted === 0) {
-    // Heat's off: the law peels away and becomes ordinary traffic.
-    for (const v of cops) {
-      v.kind = 'car';
-      v.driver = 'traffic';
-      v.color = '#95a5a6';
-      const nearestV = WORLD.vRoads.reduce((a, b) => (Math.abs(b - v.x) < Math.abs(a - v.x) ? b : a));
-      v.axis = 'v';
-      v.centre = nearestV;
-      v.dir = v.y < state.player.y ? 1 : -1;
+  // Bust meter: a bust needs the player pinned — an interceptor right on
+  // top of them and the player nearly stopped, held for a few seconds.
+  // Pausing in traffic behind a tailing cop is not a bust.
+  const p = game.player;
+  let nearest = Infinity;
+  for (const car of game.cars) {
+    if (car.kind === 'police' && !car.dead) {
+      nearest = Math.min(nearest, dist(p.x, p.y, car.x, car.y));
     }
-    return;
   }
-  if (cops.length < desired && state.tick - state.lastCopSpawn > COP.spawnGap) {
-    if (spawnCop(state)) state.lastCopSpawn = state.tick;
+  if (w.stars > 0 && nearest < 85 && p.speedMag < 30) {
+    w.bust = Math.min(1, w.bust + dt / 3.0);
+  } else {
+    w.bust = Math.max(0, w.bust - dt * 0.7);
   }
 }
 
-export function stepCop(state, v) {
-  const p = state.player;
-  const target = p.inCar ? state.vehicles.find((c) => c.id === p.inCar) : p;
-  const tx = target ? target.x : p.x;
-  const ty = target ? target.y : p.y;
-  // Aim a little ahead of a moving target — they cut corners like they mean it.
-  const lead = clamp(Math.hypot(tx - v.x, ty - v.y) / 60, 0, 14);
-  const aimX = tx + (target && target.speed ? Math.cos(target.angle) * target.speed * lead : 0);
-  const aimY = ty + (target && target.speed ? Math.sin(target.angle) * target.speed * lead : 0);
-  const desired = Math.atan2(aimY - v.y, aimX - v.x);
-  v.angle = turnToward(v.angle, desired, 0.055);
-  const d = Math.hypot(tx - v.x, ty - v.y);
-  const targetSpeed = d > 130 ? COP.speed : d > 55 ? COP.speed * 0.55 : COP.speed * 0.25;
-  v.speed += clamp(targetSpeed - v.speed, -0.2, 0.1);
-  v.x += Math.cos(v.angle) * v.speed;
-  v.y += Math.sin(v.angle) * v.speed;
-  const res = collideCircle(state.city, v.x, v.y, 17);
-  if (res.hit) {
-    v.x = res.x;
-    v.y = res.y;
-    if (Math.abs(v.speed) > 2.4) damageCar(state, v, 3, v.x, v.y);
-    v.speed *= 0.4;
-    v.angle += 0.4; // scrape along and come back for another go
+// --- pursuit ---------------------------------------------------------------
+
+function spawnPolice(game) {
+  const p = game.player;
+  const spot = roadPointNear(game.rng, p.x, p.y, game.rng.range(680, 860));
+  const car = makeCar(game.rng, spot.x, spot.y, 'police');
+  car.model = { ...POLICE_MODEL, topSpeed: POLICE_SPEED[Math.max(1, game.wanted.stars)] };
+  car.angle = Math.atan2(p.y - spot.y, p.x - spot.x);
+  car.stuckFor = 0;
+  game.cars.push(car);
+  return car;
+}
+
+export function policeCount(game) {
+  return game.cars.filter((c) => c.kind === 'police' && !c.dead).length;
+}
+
+export function updatePolice(game, dt) {
+  const w = game.wanted;
+  const p = game.player;
+  w.spawnCooldown -= dt;
+  const want = POLICE_BY_STAR[w.stars];
+  const have = policeCount(game);
+  if (w.stars > 0 && have < want && w.spawnCooldown <= 0) {
+    spawnPolice(game);
+    w.spawnCooldown = 1.1;
   }
-  // Ramming the player's car trades damage both ways.
-  if (p.inCar) {
-    const pv = state.vehicles.find((c) => c.id === p.inCar);
-    if (pv && dist2(v.x, v.y, pv.x, pv.y) < 38 * 38 && state.tick - (v.lastHitAt || -99) > 40) {
-      v.lastHitAt = state.tick;
-      const impact = Math.abs(v.speed) + Math.abs(pv.speed);
-      if (impact > 2.5) {
-        damageCar(state, pv, impact * 1.6, pv.x, pv.y);
-        damageCar(state, v, impact * 1.2, v.x, v.y);
-        state.audio.crash(Math.min(1, impact / 8));
-        state.shake = Math.min(10, impact);
+  // Despawn far units when the heat is off or they are lost.
+  game.cars = game.cars.filter((car) => {
+    if (car.kind !== 'police') return true;
+    const d = dist(p.x, p.y, car.x, car.y);
+    if (w.stars === 0 && d > 700) return false;
+    if (d > 2000) return false;
+    return true;
+  });
+
+  for (const car of game.cars) {
+    if (car.kind !== 'police' || car.dead) continue;
+    // Aim at where the player is heading, not just where they are.
+    const lead = p.inCar ? 0.45 : 0.15;
+    const tx = p.x + p.vx * lead;
+    const ty = p.y + p.vy * lead;
+    const wantAngle = Math.atan2(ty - car.y, tx - car.x);
+    let diff = wantAngle - car.angle;
+    while (diff > Math.PI) diff -= Math.PI * 2;
+    while (diff < -Math.PI) diff += Math.PI * 2;
+    const d = dist(car.x, car.y, p.x, p.y);
+    let throttle = 1;
+    let steer = Math.max(-1, Math.min(1, diff * 2.4));
+    if (Math.abs(diff) > 2.2 && d < 130) {
+      throttle = -0.7; // nose is wrong and close: back up and swing round
+      steer = -steer;
+    } else if (d < 52 && p.speedMag < 40) {
+      throttle = 0.25; // pin the player, don't plough through them
+    }
+    const impact = stepCarPhysics(game, car, throttle, steer, 0, dt);
+    if (impact > 130) game.onPoliceCrash(car, impact);
+    // Stuck detection: a wedged unit is quietly replaced by a fresh one.
+    if (Math.abs(car.speed) < 8 && d > 90) {
+      car.stuckFor = (car.stuckFor || 0) + dt;
+      if (car.stuckFor > 3) {
+        const spot = roadPointNear(game.rng, p.x, p.y, game.rng.range(640, 820));
+        car.x = spot.x;
+        car.y = spot.y;
+        car.angle = Math.atan2(p.y - spot.y, p.x - spot.x);
+        car.speed = 0;
+        car.stuckFor = 0;
       }
-      v.speed *= 0.45;
+    } else {
+      car.stuckFor = 0;
     }
   }
-  if (state.tick % 30 === 0) state.audio.siren(state.tick);
 }
 
-// The bust meter: close cops + a slow player = hands up.
-export function stepBust(state) {
-  if (state.wanted === 0) { state.bust = 0; return false; }
-  const p = state.player;
-  let near = false;
-  for (const v of state.vehicles) {
-    if (v.kind === 'cop' && v.driver === 'cop' && !v.wrecked && dist2(p.x, p.y, v.x, v.y) < COP.bustRange * COP.bustRange) near = true;
+export function anyPoliceNear(game, radius) {
+  const p = game.player;
+  for (const car of game.cars) {
+    if (car.kind === 'police' && !car.dead && dist(p.x, p.y, car.x, car.y) < radius) return true;
   }
-  const slow = p.inCar
-    ? Math.abs((state.vehicles.find((c) => c.id === p.inCar) || { speed: 0 }).speed) < 0.9
-    : state.playerSpeed < 0.4;
-  if (near && slow) state.bust = Math.min(100, state.bust + COP.bustFill);
-  else state.bust = Math.max(0, state.bust - COP.bustDrain);
-  return state.bust >= 100;
+  return false;
 }
