@@ -1,297 +1,258 @@
-// missions.js — the story of Palm City Heat: Kai Mercer, a broke courier at
-// the Sunset Palms Motel, takes jobs from fixer Solana "Sol" Reyes to climb
-// out of debt. Four story missions, then endless odd jobs.
-// One job: mission definitions, the active-mission state machine, stage
-// timers, dialogue, payouts and fail states.
+// Palm City Heat — the story: Marisol Vega's jobs for a courier who owes her, told as a
+// chain of four missions plus endless courier work after. A small state machine — idle at
+// the bar, dialogue on offer, stages while active — with map markers, timers, fail states
+// and cash payouts. Drawing the dialogue and markers is render.js's job; this module owns
+// the plot and the rules.
 
-import { poiById, dist } from './world.js';
-import { makeCar } from './vehicles.js';
-import { setHeat } from './police.js';
+import { setStars, clearWanted } from './police.js';
+import { spawnGoldCoupe } from './vehicles.js';
+import { floatText } from './combat.js';
+import { randomRoadPoint } from './world.js';
 
-export const CONTACT = 'Sol Reyes';
+export const CONTACT = 'Marisol Vega';
+export const PLAYER_NAME = 'Cleo Marchetti';
 
-// Story missions. startPoi: where the job is picked up. Stages run in order;
-// a stage completes when the player reaches (x,y) within r — deliverCar also
-// requires arriving in the mission car. timeLimit counts down per stage.
-export const STORY = [
+const STORY = [
   {
-    id: 'first-run',
-    title: 'First Run',
-    startPoi: 'cafe',
-    payout: 450,
+    title: 'Hot Package',
+    pay: 300,
     intro: [
-      'Sol: Kai. You owe the motel, you owe me, and your van is a lawn ornament.',
-      'Sol: Simple job. Mercado Sol has a package for me — pick it up, take it to Harbor Tower.',
-      'Sol: The clock starts when the package is in your hands. Move.',
+      'Marisol: Cleo. You owe me for the van, so you work. Simple maths.',
+      'Marisol: A package is sitting in a downtown alley, and Diner Solano wants it before the ice melts.',
+      'Marisol: Pick it up, drive it south, do not open it. Especially do not open it.',
     ],
+    outro: ['Marisol: Delivered, unopened, and only slightly illegal. We are getting somewhere.'],
     stages: [
-      { kind: 'pickup', poi: 'market', r: 44, label: 'Pick up the package at Mercado Sol' },
-      { kind: 'goto', poi: 'office', r: 48, label: 'Deliver to Harbor Tower', timeLimit: 150 },
+      { kind: 'goto', x: 1680, y: 984, label: 'Pick up the package downtown' },
+      { kind: 'goto', x: 2160, y: 1900, label: 'Deliver to Diner Solano', time: 150 },
     ],
-    outro: 'Sol: Clean and quick. There may be hope for you yet.',
   },
   {
-    id: 'golden-coupe',
-    title: 'The Golden Coupe',
-    startPoi: 'cafe',
-    payout: 800,
+    title: 'Borrowed Wheels',
+    pay: 500,
     intro: [
-      'Sol: A guest at Hotel Brisa skipped out on a very large tab.',
-      'Sol: His golden coupe sits in the hotel lot. Take it to Tito at Andrade Auto.',
-      'Sol: Tito pays for the car, not for a story. Bring it in one piece.',
+      'Marisol: A guest at Hotel Brisa leaves tomorrow. His gold coupe, sadly, leaves tonight.',
+      "Marisol: Take it to Rudy's Chop Shop in the suburbs. Rudy asks no questions. Neither do I.",
+      'Marisol: If the car dies, the deal dies. Drive it like you borrowed it. Because you did.',
     ],
+    outro: ['Marisol: Rudy is thrilled. The guest will be... philosophical. Good work.'],
     stages: [
-      { kind: 'goto', poi: 'hotel', r: 60, label: 'Go to the Hotel Brisa parking lot' },
-      { kind: 'deliverCar', poi: 'garage', r: 58, label: 'Deliver the golden coupe to Andrade Auto' },
+      { kind: 'goto', x: 2208, y: 504, label: 'Reach Hotel Brisa' },
+      { kind: 'steal', label: 'Steal the gold coupe' },
+      { kind: 'deliverCar', x: 264, y: 1900, label: "Deliver the coupe to Rudy's" },
     ],
-    outro: 'Tito: Ha! She still shines. Sol said you were a driver — she undersold it.',
   },
   {
-    id: 'hot-stash',
-    title: 'Hot Stash',
-    startPoi: 'cafe',
-    payout: 1100,
+    title: 'Heat Run',
+    pay: 700,
     intro: [
-      'Sol: Change of plans. A stash under the park pavilion needs to move. Now.',
-      'Sol: The second you touch it, every badge in Palm City will smell it.',
-      'Sol: Lose them and get to the Sunset Palms Motel. Do not get caught holding it.',
+      'Marisol: Portside Warehouse. A stash that needs to not be there when the auditors come.',
+      'Marisol: The moment you grab it, every patrol in Palm City will know your face.',
+      'Marisol: So run. The beach safehouse, north end. Do not stop to sightsee.',
     ],
+    outro: ['Marisol: Three stars and you still made it home. The city is learning your name.'],
     stages: [
-      { kind: 'goto', poi: 'pavilion', r: 40, label: 'Grab the stash at the pavilion', armHeat: 75 },
-      { kind: 'escape', poi: 'motel', r: 58, label: 'Reach the Sunset Palms Motel safehouse' },
+      { kind: 'goto', x: 72, y: 2064, label: 'Grab the stash at Portside Warehouse', armHeat: true },
+      { kind: 'goto', x: 2472, y: 300, label: 'Escape to the beach safehouse', clearHeat: true },
     ],
-    outro: 'Sol: You walked out of a three-star welcome party. I am officially impressed.',
   },
   {
-    id: 'palm-city-run',
-    title: 'The Palm City Run',
-    startPoi: 'cafe',
-    payout: 1600,
+    title: 'Palm City Run',
+    pay: 1000,
     intro: [
-      'Sol: Last one, and it is a big one. Three drops, one evening, whole city.',
-      'Sol: Coral Tower, Hotel Brisa, the Maple Street house — then home to the motel.',
-      'Sol: Finish this and your debt is a story you tell, not a number you owe.',
+      'Marisol: Last job, then your debt is ash. Three drops, one evening, whole city.',
+      'Marisol: Old Town, Downtown, South Beach. The clock is not your friend.',
+      'Marisol: Finish it, Cleo, and Palm City owes YOU for a change.',
     ],
+    outro: ['Marisol: Debt paid in full. Stay for courier work any time — the bar is always open.'],
     stages: [
-      { kind: 'goto', poi: 'tower', r: 48, label: 'Drop 1: Coral Tower', timeLimit: 110 },
-      { kind: 'goto', poi: 'hotel', r: 54, label: 'Drop 2: Hotel Brisa', timeLimit: 130 },
-      { kind: 'goto', poi: 'house', r: 48, label: 'Drop 3: Maple Street House', timeLimit: 130 },
-      { kind: 'goto', poi: 'motel', r: 54, label: 'Finish at the Sunset Palms Motel', timeLimit: 120 },
+      { kind: 'goto', x: 264, y: 504, label: 'Checkpoint: Old Town', time: 240 },
+      { kind: 'goto', x: 1680, y: 1464, label: 'Checkpoint: Downtown' },
+      { kind: 'goto', x: 2472, y: 1900, label: 'Checkpoint: South Beach' },
     ],
-    outro: 'Sol: Debt cleared, courier. Palm City is yours now — the jobs keep coming if you want them.',
   },
 ];
 
 export function createMissionState() {
   return {
-    storyIndex: 0, // next story mission to offer
-    active: null, // { def, stageIndex, timeLeft, car }
-    dialogue: [], // queued lines [{who, text}]
-    dialogueTimer: 0,
-    banner: '',
-    bannerTimer: 0,
-    jobsDone: 0,
-    storyDone: false,
-    job: null, // current repeatable odd job definition, when offered
+    index: 0,            // next story mission; >= STORY.length means courier mode
+    phase: 'idle',       // 'idle' | 'offer' | 'active'
+    stageIdx: 0,
+    timer: null,         // seconds left on the current stage, or null
+    dialogue: null,      // { lines, idx, onDone } while talking
+    targetCarId: null,
+    courier: null,       // generated job while in courier mode
+    title: '',
+    pay: 0,
   };
 }
 
-function stagePoint(game, stage) {
-  const poi = poiById(game.world, stage.poi);
-  return { x: poi.x, y: poi.y };
+function currentDef(state) {
+  const m = state.mission;
+  if (m.index < STORY.length) return STORY[m.index];
+  return m.courier;
 }
 
-export function availableMission(game) {
-  const ms = game.missions;
-  if (ms.active) return null;
-  if (ms.storyIndex < STORY.length) return STORY[ms.storyIndex];
-  return ms.job;
+function currentStage(state) {
+  const def = currentDef(state);
+  if (!def || state.mission.phase !== 'active') return null;
+  return def.stages[state.mission.stageIdx] || null;
 }
 
-export function availablePoint(game) {
-  const def = availableMission(game);
-  if (!def) return null;
-  const poi = poiById(game.world, def.startPoi);
-  return { x: poi.x, y: poi.y, def };
-}
-
-export function currentObjective(game) {
-  const ms = game.missions;
-  if (ms.active) {
-    const stage = ms.active.def.stages[ms.active.stageIndex];
-    const pt = stagePoint(game, stage);
-    const d = Math.round(dist(game.player.x, game.player.y, pt.x, pt.y) / 10);
-    let text = stage.label + '  ·  ' + d + 'm';
-    if (ms.active.timeLeft !== null) text += '  ·  ' + Math.ceil(ms.active.timeLeft) + 's';
-    return text;
+/** Where the gold marker belongs right now, or null when there is nothing to point at. */
+export function currentMarker(state) {
+  const m = state.mission;
+  const contact = state.world.pois.contact;
+  if (m.phase === 'idle' || m.phase === 'offer') return { x: contact.x, y: contact.y };
+  const stage = currentStage(state);
+  if (!stage) return null;
+  if (stage.kind === 'steal') {
+    const car = state.cars.find((c) => c.id === m.targetCarId);
+    return car ? { x: car.x, y: car.y } : null;
   }
-  const avail = availablePoint(game);
-  if (avail) {
-    const d = Math.round(dist(game.player.x, game.player.y, avail.x, avail.y) / 10);
-    return 'New job: ' + avail.def.title + '  ·  ' + d + 'm';
+  return { x: stage.x, y: stage.y };
+}
+
+/** The one-line objective the HUD shows. */
+export function currentObjective(state) {
+  const m = state.mission;
+  if (m.dialogue) return 'Talking to Marisol…';
+  if (m.phase === 'offer') return `Talk to ${CONTACT}`;
+  if (m.phase === 'active') {
+    const stage = currentStage(state);
+    if (!stage) return '';
+    const marker = currentMarker(state);
+    const dist = marker ? Math.round(Math.hypot(marker.x - state.player.x, marker.y - state.player.y) / 10) : 0;
+    return `${m.title}: ${stage.label} · ${dist}m`;
   }
-  return 'Free roam — Palm City is yours';
+  return m.index < STORY.length ? `See ${CONTACT} at the boardwalk bar` : `See ${CONTACT} for courier work`;
 }
 
-export function currentMarker(game) {
-  const ms = game.missions;
-  if (ms.active) {
-    const stage = ms.active.def.stages[ms.active.stageIndex];
-    if (stage.kind === 'deliverCar' && ms.active.car && !game.player.inCar) {
-      return { x: ms.active.car.x, y: ms.active.car.y, color: '#e8b93b' };
-    }
-    const pt = stagePoint(game, stage);
-    return { x: pt.x, y: pt.y, color: '#ffb347' };
-  }
-  const avail = availablePoint(game);
-  if (avail) return { x: avail.x, y: avail.y, color: '#7fe08a' };
-  return null;
+/** Opens the offer dialogue when the player talks to Marisol. */
+export function talkToContact(state) {
+  const m = state.mission;
+  if (m.phase !== 'idle') return;
+  if (m.index >= STORY.length && !m.courier) makeCourier(state);
+  const def = currentDef(state);
+  m.phase = 'offer';
+  m.dialogue = { lines: def.intro.slice(), idx: 0, onDone: 'accept' };
+  state.events.push({ type: 'dialogue', x: state.player.x, y: state.player.y });
 }
 
-function queueDialogue(ms, lines) {
-  for (const line of lines) {
-    const split = line.indexOf(':');
-    ms.dialogue.push({ who: line.slice(0, split), text: line.slice(split + 1).trim() });
-  }
-  ms.dialogueTimer = 0;
+/** Advances an open dialogue; at the end, an offer becomes the active mission. */
+export function advanceDialogue(state) {
+  const m = state.mission;
+  if (!m.dialogue) return;
+  m.dialogue.idx += 1;
+  state.events.push({ type: 'dialogue', x: state.player.x, y: state.player.y });
+  if (m.dialogue.idx < m.dialogue.lines.length) return;
+  const onDone = m.dialogue.onDone;
+  m.dialogue = null;
+  if (onDone === 'accept') acceptMission(state);
 }
 
-export function startMission(game, def) {
-  const ms = game.missions;
-  ms.active = { def, stageIndex: 0, timeLeft: null, car: null };
-  queueDialogue(ms, def.intro);
-  setStage(game, 0);
-  game.audio.pickup();
-}
-
-function setStage(game, idx) {
-  const ms = game.missions;
-  const stage = ms.active.def.stages[idx];
-  ms.active.stageIndex = idx;
-  ms.active.timeLeft = stage.timeLimit || null;
-  // The golden coupe appears in the Hotel Brisa lot when its mission starts.
-  if (ms.active.def.id === 'golden-coupe' && idx === 0 && !ms.active.car) {
-    const car = makeCar(game.rng, 3961, 1401, 'mission', 'sport');
-    car.color = '#e8b93b';
-    car.angle = Math.PI / 2;
-    car.driver = false;
-    ms.active.car = car;
-    game.cars.push(car);
+function acceptMission(state) {
+  const m = state.mission;
+  const def = currentDef(state);
+  m.phase = 'active';
+  m.stageIdx = 0;
+  m.title = def.title;
+  m.pay = def.pay;
+  m.timer = def.stages[0].time || null;
+  if (def === STORY[1]) {
+    const car = spawnGoldCoupe(state);
+    m.targetCarId = car.id;
   }
 }
 
-export function completeMission(game) {
-  const ms = game.missions;
-  const def = ms.active.def;
-  game.player.cash += def.payout;
-  ms.jobsDone += 1;
-  queueDialogue(ms, [def.outro]);
-  ms.banner = def.title + ' complete  ·  +$' + def.payout;
-  ms.bannerTimer = 4;
-  game.audio.missionGood();
-  game.addFloater(game.player.x, game.player.y - 24, '+$' + def.payout, '#7fe08a');
-  ms.active = null;
-  if (def.id === STORY[STORY.length - 1].id) ms.storyDone = true;
-  if (STORY.includes(def)) ms.storyIndex += 1;
-  if (def.id === 'odd-job') ms.job = makeOddJob(game);
-  if (ms.storyIndex >= STORY.length && !ms.job) ms.job = makeOddJob(game);
-  game.saveGame();
-}
-
-export function failMission(game, reason) {
-  const ms = game.missions;
-  if (!ms.active) return;
-  ms.banner = ms.active.def.title + ' failed — ' + reason;
-  ms.bannerTimer = 4;
-  game.audio.missionBad();
-  if (ms.active.car && ms.active.car.kind === 'mission') {
-    ms.active.car.kind = 'parked'; // the coupe stays in the world as a normal car
-  }
-  ms.active = null;
-}
-
-// Repeatable work once the story is done (and it refreshes after each job).
-export function makeOddJob(game) {
-  const rng = game.rng;
-  const places = ['market', 'office', 'hotel', 'tower', 'house', 'garage', 'cafe', 'pavilion'];
-  const from = rng.pick(places);
-  let to = rng.pick(places);
-  if (to === from) to = 'motel';
-  const a = poiById(game.world, from);
-  const b = poiById(game.world, to);
-  const d = dist(a.x, a.y, b.x, b.y);
-  return {
-    id: 'odd-job',
-    title: 'Odd Job',
-    startPoi: from,
-    payout: Math.round(120 + d / 6),
-    intro: ['Sol: Quick run, no questions. Pick up at ' + a.name + ', drop at ' + b.name + '.'],
-    stages: [
-      { kind: 'pickup', poi: from, r: 46, label: 'Pick up at ' + a.name },
-      { kind: 'goto', poi: to, r: 52, label: 'Drop at ' + b.name, timeLimit: Math.round(60 + d / 22) },
-    ],
-    outro: 'Sol: Paid. Another one is on the board when you want it.',
+function makeCourier(state) {
+  const m = state.mission;
+  const target = randomRoadPoint(state.rng, state.world.pois.contact.x, state.world.pois.contact.y, 750);
+  const dist = Math.hypot(target.x - state.world.pois.contact.x, target.y - state.world.pois.contact.y);
+  m.courier = {
+    title: 'Courier Run',
+    pay: 120 + Math.round(dist / 12),
+    intro: ['Marisol: Another envelope, another friend across town. The clock, as ever, is rude.'],
+    outro: ['Marisol: Quick hands. The envelope thanks you.'],
+    stages: [{ kind: 'goto', x: target.x, y: target.y, label: 'Make the delivery', time: Math.round(dist / 9) + 25 }],
   };
 }
 
-export function updateMissions(game, dt) {
-  const ms = game.missions;
-  if (ms.bannerTimer > 0) ms.bannerTimer -= dt;
-  if (ms.dialogue.length > 0) {
-    ms.dialogueTimer += dt;
-    if (ms.dialogueTimer > 4.2) {
-      ms.dialogue.shift();
-      ms.dialogueTimer = 0;
-    }
-  }
-  const p = game.player;
-  if (!ms.active) {
-    // Standing in the green marker starts the offered job.
-    const avail = availablePoint(game);
-    if (avail && dist(p.x, p.y, avail.x, avail.y) < 34 && !p.inCar) {
-      startMission(game, avail.def);
-    } else if (avail && dist(p.x, p.y, avail.x, avail.y) < 40 && p.inCar) {
-      // Driving through also works — jobs should never feel gated.
-      startMission(game, avail.def);
-    }
-    return;
-  }
-  const stage = ms.active.def.stages[ms.active.stageIndex];
-  if (ms.active.timeLeft !== null) {
-    ms.active.timeLeft -= dt;
-    if (ms.active.timeLeft <= 0) {
-      failMission(game, 'out of time');
-      return;
-    }
-  }
-  if (stage.kind === 'deliverCar') {
-    const car = ms.active.car;
-    if (!car || car.dead) {
-      failMission(game, 'the coupe was wrecked');
-      return;
-    }
-    const pt = stagePoint(game, stage);
-    if (p.inCar === car && dist(p.x, p.y, pt.x, pt.y) < stage.r) {
-      advanceStage(game);
-    }
-    return;
-  }
-  const pt = stagePoint(game, stage);
-  if (dist(p.x, p.y, pt.x, pt.y) < stage.r) {
-    advanceStage(game);
+function failMission(state, reason) {
+  const m = state.mission;
+  m.phase = 'idle';
+  m.stageIdx = 0;
+  m.timer = null;
+  m.targetCarId = null;
+  if (m.index >= STORY.length) m.courier = null;
+  m.dialogue = { lines: [`Marisol: ${reason}`], idx: 0, onDone: 'close' };
+  state.events.push({ type: 'missionfail', x: state.player.x, y: state.player.y });
+}
+
+/** Called when the run ends badly mid-mission: the job is blown. */
+export function onPlayerDown(state) {
+  if (state.mission.phase === 'active') {
+    failMission(state, 'You went down with my cargo in play. We start that one over.');
   }
 }
 
-function advanceStage(game) {
-  const ms = game.missions;
-  const doneStage = ms.active.def.stages[ms.active.stageIndex];
-  // Grabbing the stash is the moment the heat arrives.
-  if (doneStage.armHeat) setHeat(game, doneStage.armHeat);
-  const next = ms.active.stageIndex + 1;
-  game.audio.cash();
-  if (next >= ms.active.def.stages.length) {
-    completeMission(game);
-  } else {
-    setStage(game, next);
+function completeMission(state) {
+  const m = state.mission;
+  const def = currentDef(state);
+  state.player.cash += def.pay;
+  floatText(state, state.player.x, state.player.y - 24, `+$${def.pay}`, '#9be15d');
+  state.events.push({ type: 'missioncomplete', x: state.player.x, y: state.player.y, pay: def.pay });
+  m.dialogue = { lines: def.outro.slice(), idx: 0, onDone: 'close' };
+  m.phase = 'idle';
+  m.stageIdx = 0;
+  m.timer = null;
+  m.targetCarId = null;
+  if (m.index < STORY.length) m.index += 1;
+  else m.courier = null;
+}
+
+function advanceStage(state) {
+  const m = state.mission;
+  const def = currentDef(state);
+  const stage = def.stages[m.stageIdx];
+  if (stage.armHeat) setStars(state, 3);
+  if (stage.clearHeat) clearWanted(state);
+  state.events.push({ type: 'stage', x: state.player.x, y: state.player.y });
+  m.stageIdx += 1;
+  if (m.stageIdx >= def.stages.length) {
+    completeMission(state);
+    return;
+  }
+  const next = def.stages[m.stageIdx];
+  m.timer = next.time || (def.stages[0].time && m.stageIdx > 0 ? m.timer : null);
+  // A timer set on stage 0 of a timed run carries across its later stages.
+  if (def.stages[0].time && m.stageIdx > 0 && next.time == null) m.timer = m.timer ?? def.stages[0].time;
+}
+
+/** Stage checks and timers, run once per simulation step. */
+export function updateMissions(state, dt) {
+  const m = state.mission;
+  if (m.phase !== 'active') return;
+  const stage = currentStage(state);
+  if (!stage) return;
+  if (m.timer != null) {
+    m.timer -= dt;
+    if (m.timer <= 0) {
+      failMission(state, 'Out of time. The job rots, and so does my patience. Again — faster.');
+      return;
+    }
+  }
+  const p = state.player;
+  if (stage.kind === 'goto') {
+    if (Math.hypot(p.x - stage.x, p.y - stage.y) < 54) advanceStage(state);
+  } else if (stage.kind === 'steal') {
+    if (p.car && p.car.id === m.targetCarId) advanceStage(state);
+  } else if (stage.kind === 'deliverCar') {
+    const car = state.cars.find((c) => c.id === m.targetCarId);
+    if (!car || car.hp <= 0) {
+      failMission(state, 'The coupe is scrap. Rudy pays for cars, not for modern art.');
+      return;
+    }
+    if (p.car && p.car.id === m.targetCarId && Math.hypot(p.x - stage.x, p.y - stage.y) < 64) advanceStage(state);
   }
 }

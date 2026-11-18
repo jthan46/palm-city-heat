@@ -1,92 +1,65 @@
-// config.js — Palm City Heat: every shared tuning constant and the golden-hour palette.
-// One job: numbers and colours the rest of the game reads, so balance lives in one place.
+// Palm City Heat — shared tuning constants. Every module reads its numbers from here so the
+// whole game can be rebalanced in one place.
 
-export const STEP = 1 / 60; // fixed simulation step, seconds
+export const TILE = 48;                 // pixel size of one city tile
+export const WORLD_TILES_X = 64;        // city width in tiles
+export const WORLD_TILES_Y = 48;        // city height in tiles
+export const WORLD_W = WORLD_TILES_X * TILE;
+export const WORLD_H = WORLD_TILES_Y * TILE;
 
-export const WORLD_W = 4800;
-export const WORLD_H = 3200;
+export const STEP = 1 / 60;             // fixed simulation step, seconds
+export const ROAD_PERIOD = 10;          // a road band every 10 tiles
+export const ROAD_TILES = 2;            // road bands are 2 tiles wide
+export const BEACH_X = 55;              // first sand tile column
+export const WATER_X = 58;              // first water tile column
 
-// Road grid: avenue centres run west→east, street centres north→south.
-export const AVENUES = [320, 960, 1600, 2240, 2880, 3520, 4160];
-export const STREETS = [320, 960, 1600, 2240, 2880];
-export const ROAD_HALF = 55; // half the road width in px
-export const LANE = 27; // lane offset from a road centre line
+export const PARK = { x0: 12, y0: 6, x1: 21, y1: 13 };        // tile rect of Palmetto Park
+export const DOWNTOWN = { x0: 22, y0: 14, x1: 44, y1: 33 };  // tile rect of the tower district
+export const COMMERCIAL_Y = 35;         // tile rows at or below this are the shop strip
 
-export const PLAYER = {
-  radius: 11,
-  walkSpeed: 132,
-  runSpeed: 218,
-  maxHp: 100,
-  meleeRange: 30,
-  meleeDamage: 34,
-};
+export const PLAYER_RADIUS = 11;
+export const WALK_SPEED = 96;
+export const RUN_SPEED = 168;
+export const PLAYER_MAX_HP = 100;
 
-export const WANTED = {
-  maxHeat: 125,
-  heatPerStar: 25,
-  decayDelay: 5, // seconds unseen before heat drains
-  decayRate: 4.2, // heat per second while hidden
-  pedSight: 280,
-  policeSight: 430,
-  crimes: {
-    carTheft: 25, // exactly one star
-    meleeHit: 25,
-    pedDown: 50, // two stars
-    shotFired: 12,
-    hardCrash: 12,
-    hitAndRun: 40,
-    trafficKill: 50,
-  },
-};
+export const CAR_MODELS = [
+  { name: 'compact', len: 34, wid: 17, top: 252, accel: 240 },
+  { name: 'sedan', len: 40, wid: 18, top: 272, accel: 225 },
+  { name: 'coupe', len: 38, wid: 18, top: 318, accel: 285 },
+  { name: 'van', len: 46, wid: 20, top: 228, accel: 195 },
+  { name: 'pickup', len: 44, wid: 20, top: 244, accel: 210 },
+  { name: 'taxi', len: 40, wid: 18, top: 264, accel: 230 },
+];
+export const POLICE_MODEL = { name: 'interceptor', len: 42, wid: 19, top: 330, accel: 300 };
+export const CAR_COLORS = ['#d94f30', '#3f7fbf', '#e8b93c', '#57a773', '#b8bcc4', '#7048a0', '#e4e0d8', '#2f6f6a', '#c94f7c', '#46506b'];
+export const TAXI_COLOR = '#f2b21b';
+export const POLICE_COLOR = '#1d2733';
+export const GOLD_COLOR = '#e9c33c';
 
-// Police strength per wanted star (index 0 = no stars).
-export const POLICE_BY_STAR = [0, 1, 2, 3, 5, 7];
-export const POLICE_SPEED = [0, 292, 302, 314, 330, 348];
+export const TRAFFIC_COUNT = 24;
+export const PARKED_PER_LOT = 4;
+export const PED_COUNT = 42;
 
-export const TRAFFIC_TARGET = 24; // moving cars kept around the player
-export const PED_TARGET = 26; // pedestrians kept around the player
-export const SPAWN_RADIUS = 1150;
-export const DESPAWN_RADIUS = 1550;
+export const HEAT = { theft: 55, assault: 50, shot: 35, hitPed: 85, hitCar: 18, hitPolice: 110, missionCrime: 65 };
+export const HEAT_PER_STAR = 110;       // heat points per wanted star
+export const HEAT_DECAY = 7;            // heat lost per second while unobserved
+export const UNSEEN_GRACE = 4;          // seconds unobserved before decay starts
+export const BUST_TIME = 2.6;           // seconds pinned before the bust meter fills
+
+export const START_CLOCK_MIN = 17 * 60; // 17:00, golden hour
+export const CLOCK_RATE = 1;            // game minutes per real second
 
 export const SAVE_KEY = 'palm-city-heat-save-v1';
 
-// Golden-hour palette: warm asphalt, coral roofs, teal water, long shadows.
-export const PALETTE = {
-  grass: '#5d8a4a',
-  grassDark: '#527c40',
-  parkGrass: '#69a354',
-  sand: '#e8c98a',
-  water: '#2e7f8f',
-  waterDeep: '#256b7a',
+export const COLORS = {
   road: '#4a4048',
-  roadEdge: '#5b4f57',
-  laneMark: '#e8d9a0',
-  sidewalk: '#b8a894',
-  sidewalkEdge: '#a08e78',
-  plaza: '#c4ae8e',
-  shadow: 'rgba(46, 26, 40, 0.35)',
-  skyGlow: 'rgba(255, 166, 88, 0.10)',
-  hudPanel: 'rgba(24, 16, 28, 0.72)',
-  hudText: '#ffe9c9',
-  accent: '#ffb347',
-  danger: '#ff5a4e',
-  good: '#7fe08a',
-  starOn: '#ffd94d',
-  starOff: 'rgba(255,255,255,0.25)',
+  roadEdge: '#66586a',
+  lane: '#e8d9a0',
+  sidewalk: '#b9a89a',
+  block: '#a08b74',
+  sand: '#eed9a0',
+  water: '#2e7f9e',
+  waterDeep: '#256a86',
+  grass: '#79a85b',
+  plaza: '#c2b096',
 };
-
-export const BUILDING_STYLES = {
-  tower: { colors: ['#8a6f8e', '#7a6a94', '#96757f', '#6f7d99'], minH: 5, maxH: 9 },
-  office: { colors: ['#a08b74', '#8f8272', '#b09a80', '#7d7468'], minH: 2, maxH: 5 },
-  shop: { colors: ['#d98a5f', '#c96f5a', '#e0a05c', '#b85c48', '#e8b04b'], minH: 1, maxH: 2 },
-  house: { colors: ['#e6cfa3', '#dfb98c', '#eccfb0', '#d9a97e', '#f0dcc0'], minH: 1, maxH: 1 },
-  hut: { colors: ['#f2e2b8', '#eac9a0', '#f6ead0', '#e3b98d'], minH: 1, maxH: 1 },
-};
-
-export const CAR_COLORS = [
-  '#d94f3d', '#3d7bd9', '#e8b93b', '#4fae62', '#e8e4da', '#30303a',
-  '#8a4fd9', '#d97fb0', '#3fb8ae', '#c96a2e', '#7a8899', '#f2f2f2',
-];
-
-export const GAME_TITLE = 'Palm City Heat';
-export const GAME_SUBTITLE = 'An original open-world crime game in a golden-hour city.';
