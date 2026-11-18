@@ -1,11 +1,9 @@
-// random.js — deterministic seeded randomness (mulberry32) plus small helpers.
-// One job: every random choice in the simulation flows through one of these
-// generators, so a seed plus an input script always replays identically.
+// Palm City Heat — deterministic randomness. The whole simulation draws from one mulberry32
+// stream so a seed plus an input script always replays to the same world.
 
 export function mulberry32(seed) {
   let a = seed >>> 0;
   return function next() {
-    a |= 0;
     a = (a + 0x6d2b79f5) | 0;
     let t = Math.imul(a ^ (a >>> 15), 1 | a);
     t = (t + Math.imul(t ^ (t >>> 7), 61 | t)) ^ t;
@@ -13,43 +11,28 @@ export function mulberry32(seed) {
   };
 }
 
-export class Rng {
+export class RNG {
   constructor(seed) {
     this.next = mulberry32(seed);
-    this.seed = seed;
   }
-  // Float in [0, 1).
-  float() {
-    return this.next();
-  }
-  // Float in [min, max).
-  range(min, max) {
-    return min + this.next() * (max - min);
-  }
-  // Integer in [min, max] inclusive.
-  int(min, max) {
-    return min + Math.floor(this.next() * (max - min + 1));
-  }
-  // True with probability p.
-  chance(p) {
-    return this.next() < p;
-  }
-  // Random element of an array.
-  pick(arr) {
-    return arr[Math.floor(this.next() * arr.length)];
-  }
-  // Random sign, -1 or 1.
-  sign() {
-    return this.next() < 0.5 ? -1 : 1;
-  }
+  /** Float in [0, 1). */
+  float() { return this.next(); }
+  /** Float in [min, max). */
+  range(min, max) { return min + this.next() * (max - min); }
+  /** Integer in [min, max], both ends included. */
+  int(min, max) { return min + Math.floor(this.next() * (max - min + 1)); }
+  /** True with probability p. */
+  chance(p) { return this.next() < p; }
+  /** One element of a non-empty array. */
+  pick(list) { return list[Math.floor(this.next() * list.length)]; }
 }
 
-// A tiny FNV-1a string hash, used by the headless test to fingerprint sim state.
-export function hashString(str) {
+/** Small string hash (FNV-1a) used by the headless tests to compare simulation states. */
+export function hashString(text) {
   let h = 0x811c9dc5;
-  for (let i = 0; i < str.length; i++) {
-    h ^= str.charCodeAt(i);
+  for (let i = 0; i < text.length; i += 1) {
+    h ^= text.charCodeAt(i);
     h = Math.imul(h, 0x01000193);
   }
-  return ('0000000' + (h >>> 0).toString(16)).slice(-8);
+  return (h >>> 0).toString(16).padStart(8, '0');
 }
